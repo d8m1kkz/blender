@@ -85,8 +85,8 @@ onMounted(() => {
     scene = new THREE.Scene()
     scene.background = new THREE.Color(0x0f1724)
 
-    camera = new THREE.PerspectiveCamera(80, width / height, 0.1, 1000)
-    camera.position.set(15, 15, 25)
+    camera = new THREE.PerspectiveCamera(19, width / height, 0.1, 1000)
+    camera.position.set(75, 75, 125)
     camera.lookAt(0, 0, 0)
 
     renderer = new THREE.WebGLRenderer({ antialias: true })
@@ -147,7 +147,6 @@ onMounted(() => {
                 <div ref="canvasContainer" class="canvas-box"></div>
                 <div class="overlay" :class="{ active: isLoading }" style="position: absolute; inset: 0">
                     <div class="spinner"></div>
-                    <span>Обновление модели…</span>
                 </div>
             </div>
         </div>
