@@ -1,0 +1,3 @@
+# Large binaries (keep locally, do not commit)
+*.tar.xz
+__pycache__/

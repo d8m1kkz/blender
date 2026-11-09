@@ -10,8 +10,5 @@
 <div id="app">
     <model-viewer></model-viewer>
 </div>
-<div id="app">
-    <counter-control></counter-control>
-</div>
 </body>
 </html>
