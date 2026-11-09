@@ -15,7 +15,7 @@ SSH_OPTS=(
 )
 
 ssh "${SSH_OPTS[@]}" "ubuntu@$1" 'bash -s' << 'EOF'
-set -euo pipefail
+set -euo pipefailс
 	
 cloud-init status --wait # Ожидание завершения фоновых скриптов облака
 

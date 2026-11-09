@@ -50,28 +50,42 @@ const reset = () => {
 
 <style scoped>
 .control-card {
-    max-width: 320px;
-    padding: 1.5rem;
-    border: 1px solid #e2e8f0;
-    border-radius: 8px;
-    font-family: sans-serif;
-    background: #ffffff;
-    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+    max-width: 340px;
+    padding: 1.75rem;
+    border: 1px solid rgba(148, 197, 255, 0.15);
+    border-radius: 18px;
+    font-family: inherit;
+    background: linear-gradient(160deg, #1e2d44, #16212f);
+    color: #e6edf6;
+    box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.6);
 }
-.display {
-    font-size: 1.25rem;
-    margin: 1rem 0;
+h3 {
+    margin: 0 0 1.25rem;
+    font-size: 1.15rem;
+    background: linear-gradient(90deg, #7dd3fc, #a78bfa);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
 }
 .input-group {
     margin-bottom: 1rem;
     display: flex;
     flex-direction: column;
-    gap: 0.25rem;
+    gap: 0.35rem;
+    font-size: 0.85rem;
+    color: #94a9c4;
 }
 input {
-    padding: 0.4rem;
-    border: 1px solid #cbd5e1;
-    border-radius: 4px;
+    padding: 0.5rem 0.6rem;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 8px;
+    background: #0f1724;
+    color: #e6edf6;
+    outline: none;
+}
+input:focus {
+    border-color: #7dd3fc;
+    box-shadow: 0 0 0 3px rgba(125, 211, 252, 0.2);
 }
 .buttons {
     display: flex;
@@ -79,14 +93,17 @@ input {
 }
 button {
     flex: 1;
-    padding: 0.5rem;
+    padding: 0.55rem;
     border: none;
-    border-radius: 4px;
-    background: #2563eb;
+    border-radius: 10px;
+    background: linear-gradient(90deg, #3b82f6, #8b5cf6);
     color: white;
+    font-weight: 600;
     cursor: pointer;
+    transition: transform 0.15s, filter 0.15s;
 }
 button:hover {
-    background: #1d4ed8;
+    filter: brightness(1.12);
+    transform: translateY(-1px);
 }
 </style>
