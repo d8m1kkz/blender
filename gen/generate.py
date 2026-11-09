@@ -31,9 +31,9 @@ filepath = bpy.path.abspath("/dev/shm/m.glb")
 )"""
 
 bpy.ops.export_scene.gltf(
-    filepath=filetemp,
-    export_format='GLB',
-    use_selection=True
+	filepath=filetemp,
+	export_format='GLB',
+	use_selection=True
 )
 
 with open(filetemp, 'rb') as f_in:

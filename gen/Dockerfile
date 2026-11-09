@@ -2,11 +2,11 @@ FROM python:3.11-slim-bookworm
 
 # Настраиваем APT для реального кэширования пакетов
 RUN rm -f /etc/apt/apt.conf.d/docker-clean \
-    && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
+	&& echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
 
 RUN  --mount=type=cache,target=/var/cache/apt,sharing=locked \
-     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-     apt-get update && apt-get install -y --no-install-recommends \
+	 --mount=type=cache,target=/var/lib/apt,sharing=locked \
+	 apt-get update && apt-get install -y --no-install-recommends \
 		ca-certificates \
 		xz-utils \
 	    libgl1 \
