@@ -1,15 +1,8 @@
-# Продакшен: исходники скопированы в образы, bind-mount'ов кода нет.
-# Сборка: docker compose -f docker-compose.prod.yml build
-# Запуск: docker compose -f docker-compose.prod.yml up -d
-# Секреты (APP_KEY и т.д.) задайте в файле web/.env.production (в образ не копируется).
 services:
   nginx:
     image: d8m1kkz/blender-nginx:latest
     build:
       context: ./web
-      target: web
-      additional_contexts:
-        nginx: ./nginx
     ports:
       - "80:80"
     restart: unless-stopped
@@ -21,7 +14,6 @@ services:
     image: d8m1kkz/blender-php:latest
     build:
       context: ./web
-      target: app
     env_file:
       - ./web/.env.production
     environment:
@@ -38,7 +30,6 @@ services:
     image: d8m1kkz/blender-gen:latest
     build:
       context: ./gen
-      target: prod
     shm_size: '256mb'
     environment:
       - PYTHONUNBUFFERED=1

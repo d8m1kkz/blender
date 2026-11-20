@@ -42,5 +42,5 @@ RUN composer dump-autoload --optimize --no-dev \
 
 # ---- web: prod-образ nginx со статикой из public/ ----
 FROM nginx:stable AS web
-COPY --from=nginx nginx.conf /etc/nginx/conf.d/default.conf
+COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=app /var/www/html/public /var/www/html/public
