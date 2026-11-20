@@ -17,11 +17,13 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
       - php
+      - generator
 
   php:
     image: d8m1kkz/blender-php:latest
     build:
         context: ./web
+        target: base
     volumes:
       - ./web:/var/www/html
     depends_on:

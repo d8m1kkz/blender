@@ -1,21 +1,14 @@
-"""Постоянно запущенный Blender-воркер.
-
-Запуск: blender -b cube.blend --factory-startup --python worker.py
-Слушает unix-сокет, принимает по одной JSON-строке {"x":..,"y":..,"out":..}
-и отвечает JSON-строкой {"ok":true} или {"ok":false,"error":".."}.
-Всё работает в главном потоке: bpy не потокобезопасен.
-"""
+"""Постоянно запущенный Blender-воркер."""
 import bpy, os, json, socket, traceback
 
 SOCK_PATH = os.environ.get("BLENDER_SOCK", "/dev/shm/blender.sock")
 
-obj = bpy.data.objects['Vert']
-params = bpy.data.node_groups["_params"].nodes["Group Output"]
-
+obj = bpy.data.objects['Basket']
+params = bpy.data.node_groups["_dimensions"].nodes["Group Output"]
 
 def generate(x, y, out):
-	params.inputs[0].default_value = x
-	params.inputs[1].default_value = y
+	params.inputs[1].default_value = x
+	params.inputs[2].default_value = y
 	# Значения поменялись в уже загруженной сцене: помечаем объект и пересчитываем граф
 	obj.update_tag()
 	bpy.context.view_layer.update()

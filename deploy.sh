@@ -1,25 +1,30 @@
 #!/usr/bin/env bash
-
 set -euo pipefail
 
-if [ -z "${1:-}" ]; then
-	echo "Ожитается вызов в формате: $0 <IP-адрес>" >&2
-	exit 1
-fi
+IP=${1:?"Использование: $0 <IP-адрес>"}
+cd "$(dirname "$0")"
+export COMPOSE_FILE=compose.prod.yml
 
-SSH_OPTS=(
-	-i ~/.ssh/key.pem
-	-o StrictHostKeyChecking=no     # Не запрашивать ручное подтверждение fingerprint
-	-o UserKnownHostsFile=/dev/null # Не сохранять временный ключ в known_hosts
-	-o LogLevel=ERROR               # Скрыть информационные сообщения
-)
+SSH=(ssh -i ~/.ssh/key.pem
+	-o StrictHostKeyChecking=no     # сервер новый: fingerprint не спрашивать...
+	-o UserKnownHostsFile=/dev/null # ...и не засорять known_hosts
+	-o LogLevel=ERROR               # без «Warning: Permanently added…»
+	-o ConnectionAttempts=30        # VPS может ещё загружаться
+	"ubuntu@$IP")
 
-ssh "${SSH_OPTS[@]}" "ubuntu@$1" 'bash -s' << 'EOF'
-set -euo pipefailс
+# 1. Локально: сборка и публикация образов (нужен `docker login`)
+docker compose build --push
 
-cloud-init status --wait # Ожидание завершения фоновых скриптов облака
+# 2. На VPS, одним подключением: распаковать файлы (compose-файл под именем
+#    compose.yml), дождаться cloud-init, поставить Docker, обновить образы и запустить
+tar cf - --transform="s|^$COMPOSE_FILE\$|compose.yml|" "$COMPOSE_FILE" web/.env.production |
+	"${SSH[@]}" '
+	set -euo pipefail
+	mkdir -p app
+	tar xf - -C app
+	cloud-init status --wait >/dev/null || [ $? -eq 2 ]
+	command -v docker >/dev/null || curl -fsSL https://get.docker.com | sudo sh
+	cd app && sudo docker compose up -d --pull always
+'
 
-# sudo apt update # Обновление локальных списков пакетов
-
-sudo apt clean
-EOF
+# sudo apt clean

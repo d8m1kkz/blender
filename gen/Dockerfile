@@ -1,4 +1,5 @@
-FROM python:3.11-slim-bookworm
+# ---- base: Blender + Python-зависимости ----
+FROM python:3.11-slim-bookworm AS base
 
 # Настраиваем APT для реального кэширования пакетов
 RUN rm -f /etc/apt/apt.conf.d/docker-clean \
@@ -27,4 +28,11 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install fastapi uvicorn
 
 WORKDIR /app
 
+# ---- prod: исходники внутри образа, без --reload ----
+FROM base AS prod
+COPY web.py worker.py basket.blend ./
+CMD ["uvicorn", "web:app", "--host", "0.0.0.0", "--port", "8080"]
+
+# ---- dev (последний stage = по умолчанию): код монтируется томом ----
+FROM base AS dev
 CMD ["uvicorn", "web:app", "--host", "0.0.0.0", "--port", "8080", "--reload"]

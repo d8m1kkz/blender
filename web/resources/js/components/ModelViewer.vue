@@ -4,8 +4,8 @@ import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 
 const canvasContainer = ref(null)
-const x = ref(1)
-const y = ref(2)
+const x = ref(25)
+const y = ref(25)
 
 let scene, camera, renderer, currentModel, resizeObserver
 const loader = new GLTFLoader()
@@ -42,7 +42,7 @@ const processQueue = async () => {
 			job.status = 'loading'
 			job.startedAt = Date.now()
 			try {
-				const gltf = await loader.loadAsync(`http://localhost:8080?x=${job.x}&y=${job.y}`)
+				const gltf = await loader.loadAsync(`/generate?x=${job.x}&y=${job.y}`)
 				if (currentModel) {
 					scene.remove(currentModel)
 				}
@@ -135,12 +135,12 @@ onMounted(() => {
 			<div class="controls">
 				<label class="slider">
 					<span>X</span>
-					<input v-model.number="x" type="range" min="0" max="100" step="1" @input="loadModel" />
+					<input v-model.number="x" type="range" min="20" max="100" step="1" @input="loadModel" />
 					<output>{{ x }}</output>
 				</label>
 				<label class="slider">
 					<span>Y</span>
-					<input v-model.number="y" type="range" min="0" max="100" step="1" @input="loadModel" />
+					<input v-model.number="y" type="range" min="20" max="100" step="1" @input="loadModel" />
 					<output>{{ y }}</output>
 				</label>
 			</div>

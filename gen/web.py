@@ -17,7 +17,7 @@ async def start_worker():
 		os.remove(SOCK)
 	worker = subprocess.Popen([
 		"blender",
-		"-b", "cube.blend",
+		"-b", "basket.blend",
 		"--factory-startup",
 		"--python-exit-code", "1",
 		"--python", "worker.py",
@@ -77,9 +77,9 @@ async def call_worker(payload: dict) -> dict:
 
 
 @app.get("/")
-async def generate(x: float = 100.0, y: float = 100.0):
+async def generate(x: float = 20.0, y: float = 20.0, z: float = 20.0):
 	out = f"/dev/shm/m_{uuid.uuid4().hex}.glb"
-	payload = {"x": x, "y": y, "out": out}
+	payload = {"x": x, "y": y, "z": z, "out": out}
 
 	async with lock:
 		try:
