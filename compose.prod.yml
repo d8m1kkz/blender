@@ -1,19 +1,29 @@
+# Лимит логов Docker (иначе json-file растёт бесконечно): до 3 файлов по 10 МБ на контейнер
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   nginx:
     image: d8m1kkz/blender-nginx:latest
     build:
       context: ./web
+      target: web
     ports:
       - "80:80"
+    logging: *default-logging
     restart: unless-stopped
     depends_on:
       - php
-      - generator
+      - gen
 
   php:
     image: d8m1kkz/blender-php:latest
     build:
       context: ./web
+      target: app
     env_file:
       - ./web/.env.production
     environment:
@@ -21,20 +31,20 @@ services:
       - APP_DEBUG=false
     volumes:
       - app-storage:/var/www/html/storage
-      - app-database:/var/www/html/database
+    logging: *default-logging
     restart: unless-stopped
     depends_on:
-      - generator
+      - gen
 
-  generator:
+  gen:
     image: d8m1kkz/blender-gen:latest
     build:
       context: ./gen
     shm_size: '256mb'
     environment:
       - PYTHONUNBUFFERED=1
+    logging: *default-logging
     restart: unless-stopped
 
 volumes:
   app-storage:
-  app-database:

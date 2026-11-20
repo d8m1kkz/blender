@@ -23,14 +23,18 @@ RUN --mount=type=bind,source=blender-linux-x64.tar.xz,target=/tmp/blender.tar.xz
 	mkdir -p /opt/blender \
 	&& tar -xf /tmp/blender.tar.xz -C /opt/blender --strip-components=1 \
 	&& ln -s /opt/blender/blender /usr/local/bin/blender \
-	&& rm -rf /opt/blender/5.2/datafiles/locale \
-	          /opt/blender/5.2/datafiles/studiolights \
-	          /opt/blender/lib/libcycles_kernel_oneapi_aot.so \
-	&& find /opt/blender -name '__pycache__' -type d -prune -exec rm -rf {} +
+	&& cd /opt/blender/5.2 \
+	&& rm -rf datafiles/locale datafiles/studiolights \
+	          python/lib/python3.*/site-packages/pip \
+	          python/lib/python3.*/site-packages/setuptools \
+	          python/lib/python3.*/site-packages/Cython \
+	          python/lib/python3.*/site-packages/pxr \
+	&& find /opt/blender -type d -name __pycache__ -prune -exec rm -rf {} +
 
 RUN --mount=type=cache,target=/root/.cache/pip pip install fastapi uvicorn
 
 WORKDIR /app
 
 COPY web.py worker.py basket.blend ./
+
 CMD ["uvicorn", "web:app", "--host", "0.0.0.0", "--port", "8080"]

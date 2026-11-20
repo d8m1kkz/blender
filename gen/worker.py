@@ -6,9 +6,11 @@ SOCK_PATH = os.environ.get("BLENDER_SOCK", "/dev/shm/blender.sock")
 obj = bpy.data.objects['Basket']
 params = bpy.data.node_groups["_dimensions"].nodes["Group Output"]
 
-def generate(x, y, out):
+def generate(x, y, z, out):
+	# TODO(human): ограничить x, y диапазоном 20–256, z — 20–150 (обрезать или бросить ValueError)
 	params.inputs[1].default_value = x
 	params.inputs[2].default_value = y
+	params.inputs[3].default_value = z
 	# Значения поменялись в уже загруженной сцене: помечаем объект и пересчитываем граф
 	obj.update_tag()
 	bpy.context.view_layer.update()
@@ -41,7 +43,7 @@ def handle(conn):
 			return
 		try:
 			req = json.loads(line)
-			generate(float(req["x"]), float(req["y"]), req["out"])
+			generate(float(req["x"]), float(req["y"]), float(req["z"]), req["out"])
 			resp = {"ok": True}
 		except Exception as e:
 			traceback.print_exc()
@@ -51,7 +53,7 @@ def handle(conn):
 
 
 # Прогрев: первый экспорт импортирует glTF-аддон. Делаем это до публикации сокета
-generate(100.0, 100.0, "/dev/shm/m_warmup.glb")
+generate(100.0, 100.0, 100.0, "/dev/shm/m_warmup.glb")
 os.remove("/dev/shm/m_warmup.glb")
 
 if os.path.exists(SOCK_PATH):

@@ -38,7 +38,7 @@ COPY --from=vendor /var/www/html/vendor ./vendor
 COPY --from=assets /app/public/build ./public/build
 RUN composer dump-autoload --optimize --no-dev \
 	&& mkdir -p storage/framework/cache storage/framework/sessions storage/framework/views storage/logs bootstrap/cache \
-	&& chown -R www-data:www-data storage bootstrap/cache
+	&& chown -R www-data:www-data storage bootstrap/cache database
 
 # ---- web: prod-образ nginx со статикой из public/ ----
 FROM nginx:stable AS web
