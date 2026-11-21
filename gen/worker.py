@@ -3,7 +3,7 @@ import bpy, os, json, socket, time, traceback
 
 SOCK_PATH = os.environ.get("BLENDER_SOCK", "/dev/shm/blender.sock")
 # Искусственная добавка к времени расчёта модели, секунды (0 — без задержки)
-EXTRA_DELAY = 1.0
+EXTRA_DELAY = 0
 
 obj = bpy.data.objects['Basket']
 dimensions = bpy.data.node_groups["_dimensions"];

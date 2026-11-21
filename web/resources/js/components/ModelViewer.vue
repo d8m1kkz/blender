@@ -9,6 +9,9 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 // Очередь запросов
 const MAX_HISTORY = 20
 
+// Скорость автовращения: радиан за кадр (при 60 FPS ≈ 17°/с); знак — направление
+const ROTATION_SPEED = 0.001
+
 // Прогрев Blender (повтор запроса, мс)
 const WARMUP_RETRY_DELAY = 500
 const WARMUP_MAX_WAIT = 90000
@@ -457,7 +460,7 @@ onMounted(() => {
 	// Цикл рендеринга с медленным вращением для наглядности
 	const animate = () => {
 		requestAnimationFrame(animate)
-		turntable.rotation.y += 0.005
+		turntable.rotation.y += ROTATION_SPEED
 		controls.update()
 		renderer.render(scene, camera)
 	}
