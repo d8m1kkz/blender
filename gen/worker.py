@@ -4,13 +4,12 @@ import bpy, os, json, socket, traceback
 SOCK_PATH = os.environ.get("BLENDER_SOCK", "/dev/shm/blender.sock")
 
 obj = bpy.data.objects['Basket']
-params = bpy.data.node_groups["_dimensions"].nodes["Group Output"]
+dimensions = bpy.data.node_groups["_dimensions"];
 
 def generate(x, y, z, out):
-	# TODO(human): ограничить x, y диапазоном 20–256, z — 20–150 (обрезать или бросить ValueError)
-	params.inputs[1].default_value = x
-	params.inputs[2].default_value = y
-	params.inputs[3].default_value = z
+	dimensions.nodes["Value"].outputs[0].default_value = x
+	dimensions.nodes["Value.001"].outputs[0].default_value = y
+	dimensions.nodes["Group Output"].inputs[3].default_value = z
 	# Значения поменялись в уже загруженной сцене: помечаем объект и пересчитываем граф
 	obj.update_tag()
 	bpy.context.view_layer.update()
@@ -21,7 +20,9 @@ def generate(x, y, z, out):
 	export_obj = bpy.data.objects.new("ExportTemp", mesh_data)
 	try:
 		bpy.context.scene.collection.objects.link(export_obj)
-		bpy.ops.object.select_all(action='DESELECT')
+		# Без bpy.ops.object.select_all: в фоновом режиме у него падает poll() по контексту
+		for o in bpy.context.view_layer.objects:
+			o.select_set(False)
 		export_obj.select_set(True)
 		bpy.context.view_layer.objects.active = export_obj
 
