@@ -1,7 +1,9 @@
 """Постоянно запущенный Blender-воркер."""
-import bpy, os, json, socket, traceback
+import bpy, os, json, socket, time, traceback
 
 SOCK_PATH = os.environ.get("BLENDER_SOCK", "/dev/shm/blender.sock")
+# Искусственная добавка к времени расчёта модели, секунды (0 — без задержки)
+EXTRA_DELAY = 1.0
 
 obj = bpy.data.objects['Basket']
 dimensions = bpy.data.node_groups["_dimensions"];
@@ -45,6 +47,7 @@ def handle(conn):
 		try:
 			req = json.loads(line)
 			generate(float(req["x"]), float(req["y"]), float(req["z"]), req["out"])
+			time.sleep(EXTRA_DELAY)  # имитация долгого расчёта; прогрев её не затрагивает
 			resp = {"ok": True}
 		except Exception as e:
 			traceback.print_exc()
