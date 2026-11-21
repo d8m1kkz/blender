@@ -6,15 +6,14 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
 // ── Константы ──
 
-// Очередь запросов
+// Журнал полученных моделей
 const MAX_HISTORY = 20
 
 // Скорость автовращения: радиан за кадр (при 60 FPS ≈ 17°/с); знак — направление
-const ROTATION_SPEED = 0.001
+const ROTATION_SPEED = -0.001
 
-// Прогрев Blender (повтор запроса, мс)
-const WARMUP_RETRY_DELAY = 500
-const WARMUP_MAX_WAIT = 90000
+// Пауза перед повторным подключением к генератору, мс (пока Blender прогревается, nginx отвечает 502)
+const RECONNECT_DELAY = 1000
 
 // Слои печати
 const LAYER_HEIGHT = 0.2 // толщина слоя, мм (единицы сцены)
@@ -73,50 +72,38 @@ const z = ref(50)
 let scene, camera, renderer, controls, turntable, bed, currentModel, resizeObserver
 const loader = new GLTFLoader()
 
-// Журнал очереди запросов (для отладки)
-const jobs = ref([])
-let nextId = 1
-let processing = false
+// ── Связь с генератором: WebSocket, одна общая корзина на всех клиентов ──
+// Сервер нумерует каждую правку любого клиента (version) и присылает модель вместе с x/y/z,
+// только если она актуальна: устаревшие (пока считали, пришла новая правка) не приходят вовсе.
+const connected = ref(false)
+let socket = null
+let stopped = false // компонент размонтирован — не переподключаемся
+let pendingHeader = null // заголовок «model», ждущий своего бинарного кадра с GLB
 
-const pendingCount = computed(() => jobs.value.filter((j) => j.status === 'pending').length)
-const doneCount = computed(() => jobs.value.filter((j) => j.status === 'done').length)
-const errorCount = computed(() => jobs.value.filter((j) => j.status === 'error').length)
-const isLoading = computed(() => jobs.value.some((j) => j.status === 'pending' || j.status === 'loading'))
-const reversedJobs =computed(() => [...jobs.value].reverse())
+// Мои правки: локальный номер (seq) и подтверждения сервера (ack приносит seq и присвоенную version)
+const sentSeq = ref(0) // номер последней отправленной правки
+const ackedSeq = ref(0) // номер последней правки, на которую пришёл ack
+const lastAck = ref(0) // version, присвоенная моей последней подтверждённой правке
+const shownVersion = ref(0) // версия модели на экране
+const settledVersion = ref(0) // последняя версия, по которой пришёл итог: модель или ошибка
 
-const trimHistory = () => {
-	let finished = jobs.value.filter((j) => j.status === 'done' || j.status === 'error').length
-	while (finished > MAX_HISTORY) {
-		const idx = jobs.value.findIndex((j) => j.status === 'done' || j.status === 'error')
-		jobs.value.splice(idx, 1)
-		finished--
-	}
-}
+const hasUnacked = () => sentSeq.value > ackedSeq.value
 
-const duration = (job) => (job.finishedAt ? `${job.finishedAt - job.startedAt} мс` : '')
+// Спиннер: ещё нет первой модели или ждём итог по своей правке
+const isLoading = computed(
+	() => connected.value && (shownVersion.value === 0 || hasUnacked() || lastAck.value > settledVersion.value),
+)
 
-// Пока gen прогревает Blender, nginx отвечает 502/503/504 — это временно, повторяем запрос
-const warmingUp = ref(false)
+// Журнал полученных моделей и ошибок (для отладки)
+const events = ref([])
+let nextEventId = 1
+const receivedCount = ref(0)
+const errorCount = ref(0)
+const reversedEvents = computed(() => [...events.value].reverse())
 
-const isNotReady = (e) => /responded with (502|503|504)\b/.test(e?.message || '')
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
-
-const loadWithWarmup = async (url) => {
-	const startedAt = Date.now()
-	while (true) {
-		try {
-			const gltf = await loader.loadAsync(url)
-			warmingUp.value = false
-			return gltf
-		} catch (e) {
-			if (!isNotReady(e) || Date.now() - startedAt > WARMUP_MAX_WAIT) {
-				warmingUp.value = false
-				throw e
-			}
-			warmingUp.value = true
-			await sleep(WARMUP_RETRY_DELAY)
-		}
-	}
+const logEvent = (entry) => {
+	events.value.push({ id: nextEventId++, time: new Date().toLocaleTimeString('ru-RU'), ...entry })
+	if (events.value.length > MAX_HISTORY) events.value.splice(0, events.value.length - MAX_HISTORY)
 }
 
 // Слои 3D-печати: процедурный рельеф в шейдере, без текстуры и UV.
@@ -192,54 +179,105 @@ const disposeModel = (model) => {
 	})
 }
 
-const processQueue = async () => {
-	if (processing) return
-	processing = true
+// Можно ли поставить пришедшие x/y/z в слайдеры.
+// Модель показываем всегда (сервер прислал её как актуальную), а значения — не всегда:
+// если я как раз тяну слайдер, пришедшая версия может быть старее моей правки, и слайдер «отдёрнет» назад.
+// Данные: hasUnacked() — есть ли мои правки без ack; lastAck.value — version моей последней подтверждённой;
+// msg.version — версия пришедшей модели.
+const shouldApplyValues = (msg) => {
+	// TODO(human)
+	return true
+}
+
+// Заменяет модель на столе
+const showModel = async (header, buffer) => {
+	let gltf
 	try {
-		let job
-		while ((job = jobs.value.find((j) => j.status === 'pending'))) {
-			job.status = 'loading'
-			job.startedAt = Date.now()
-			try {
-				const gltf = await loadWithWarmup(`/generate?x=${job.x}&y=${job.y}&z=${job.z}`)
-				if (currentModel) {
-					turntable.remove(currentModel)
-					disposeModel(currentModel)
-				}
-				currentModel = gltf.scene
-				prepareModel(currentModel)
-				// Слои печати отсчитываются от дна модели (той же высоты, где стоит стол)
-				layerUniforms.uLayerBase.value = placeBed(bed, currentModel)
-				turntable.add(currentModel)
-				job.status = 'done'
-			} catch (e) {
-				job.status = 'error'
-				job.error = e?.message || String(e)
-			}
-			job.finishedAt = Date.now()
-			trimHistory()
-		}
-	} finally {
-		processing = false
+		gltf = await loader.parseAsync(buffer, '')
+	} catch (e) {
+		errorCount.value++
+		logEvent({ version: header.version, status: 'error', error: `разбор GLB: ${e?.message || e}` })
+		return
+	}
+	// Пока разбирали, могла показаться более новая модель
+	if (header.version <= shownVersion.value) {
+		disposeModel(gltf.scene)
+		return
+	}
+	if (currentModel) {
+		turntable.remove(currentModel)
+		disposeModel(currentModel)
+	}
+	currentModel = gltf.scene
+	prepareModel(currentModel)
+	// Слои печати отсчитываются от дна модели (той же высоты, где стоит стол)
+	layerUniforms.uLayerBase.value = placeBed(bed, currentModel)
+	turntable.add(currentModel)
+
+	shownVersion.value = header.version
+	settledVersion.value = Math.max(settledVersion.value, header.version)
+	if (shouldApplyValues(header)) {
+		x.value = header.x
+		y.value = header.y
+		z.value = header.z
+	}
+	receivedCount.value++
+	logEvent({ version: header.version, status: 'done', params: `x=${header.x}, y=${header.y}, z=${header.z}` })
+}
+
+const onMessage = (data) => {
+	// Бинарный кадр — GLB к заголовку «model», который пришёл прямо перед ним
+	if (data instanceof ArrayBuffer) {
+		const header = pendingHeader
+		pendingHeader = null
+		if (header) showModel(header, data)
+		return
+	}
+	const msg = JSON.parse(data)
+	if (msg.type === 'ack') {
+		ackedSeq.value = msg.seq
+		lastAck.value = msg.version
+	} else if (msg.type === 'model') {
+		pendingHeader = msg
+	} else if (msg.type === 'error') {
+		settledVersion.value = Math.max(settledVersion.value, msg.version)
+		errorCount.value++
+		logEvent({ version: msg.version, status: 'error', error: msg.error })
 	}
 }
 
-// Ставит запрос на обновление модели в очередь
-const loadModel = () => {
-	// Оставляем только выполняющееся и самое последнее задание: прежнее ожидающее выбрасываем
-	jobs.value = jobs.value.filter((j) => j.status !== 'pending')
-	jobs.value.push({
-		id: nextId++,
-		x: x.value,
-		y: y.value,
-		z: z.value,
-		status: 'pending',
-		createdAt: Date.now(),
-		startedAt: null,
-		finishedAt: null,
-		error: null,
-	})
-	processQueue()
+const wsUrl = () => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`
+
+const connect = () => {
+	if (stopped) return
+	socket = new WebSocket(wsUrl())
+	socket.binaryType = 'arraybuffer'
+	socket.onopen = () => {
+		connected.value = true
+		// gen мог перезапуститься и начать нумерацию заново: забываем старые версии.
+		// Сразу после подключения сервер пришлёт текущую корзину.
+		ackedSeq.value = sentSeq.value
+		lastAck.value = 0
+		shownVersion.value = 0
+		settledVersion.value = 0
+	}
+	socket.onmessage = (e) => onMessage(e.data)
+	// Обрыв или неудачное подключение (gen ещё прогревает Blender) — пробуем снова
+	socket.onclose = () => {
+		connected.value = false
+		pendingHeader = null
+		ackedSeq.value = sentSeq.value // подтверждения по этому соединению уже не придут
+		socket = null
+		if (!stopped) setTimeout(connect, RECONNECT_DELAY)
+	}
+}
+
+// Отправляет правку слайдера в общую корзину
+const sendParams = () => {
+	// Нет связи — правка остаётся локальной; после переподключения придёт общая корзина
+	if (socket?.readyState !== WebSocket.OPEN) return
+	sentSeq.value++
+	socket.send(JSON.stringify({ type: 'params', x: x.value, y: y.value, z: z.value, seq: sentSeq.value }))
 }
 
 // Возврат к исходному виду: камера, точка обзора и поворот столика с моделью
@@ -384,6 +422,8 @@ const placeBed = (bed, model) => {
 }
 
 onBeforeUnmount(() => {
+	stopped = true
+	socket?.close()
 	resizeObserver?.disconnect()
 	controls?.dispose()
 	document.removeEventListener('fullscreenchange', syncFullscreen)
@@ -478,8 +518,8 @@ onMounted(() => {
 	resizeObserver = new ResizeObserver(resize)
 	resizeObserver.observe(canvasContainer.value)
 
-	// Первая загрузка
-	loadModel()
+	// Подключение к генератору: сразу придёт текущая общая корзина
+	connect()
 })
 </script>
 
@@ -490,12 +530,12 @@ onMounted(() => {
 			<div class="controls">
 				<label class="slider">
 					<span>X</span>
-					<input v-model.number="x" type="range" min="20" max="256" step="1" @input="loadModel" />
+					<input v-model.number="x" type="range" min="20" max="256" step="1" @input="sendParams" />
 					<output>{{ x }}</output>
 				</label>
 				<label class="slider">
 					<span>Y</span>
-					<input v-model.number="y" type="range" min="20" max="256" step="1" @input="loadModel" />
+					<input v-model.number="y" type="range" min="20" max="256" step="1" @input="sendParams" />
 					<output>{{ y }}</output>
 				</label>
 			</div>
@@ -503,15 +543,15 @@ onMounted(() => {
 			<div class="viewer-row">
 				<label class="slider-z">
 					<span>Z</span>
-					<input v-model.number="z" type="range" min="20" max="150" step="1" class="vertical" @input="loadModel" />
+					<input v-model.number="z" type="range" min="20" max="150" step="1" class="vertical" @input="sendParams" />
 					<output>{{ z }}</output>
 				</label>
 
 				<div ref="viewerArea" class="canvas-wrap" :class="{ 'is-fullscreen': isFullscreen }">
 					<div ref="canvasContainer" class="canvas-box"></div>
-					<div class="overlay" :class="{ active: isLoading }" style="position: absolute; inset: 0">
+					<div class="overlay" :class="{ active: isLoading || !connected }" style="position: absolute; inset: 0">
 						<div class="spinner"></div>
-						<div v-if="warmingUp">Прогрев Blender…</div>
+						<div v-if="!connected">Подключение к генератору…</div>
 					</div>
 					<button
 						type="button"
@@ -536,22 +576,22 @@ onMounted(() => {
 		<aside class="queue-panel">
 
 			<div class="queue-summary">
-				<span class="stat pending">В очереди: {{ pendingCount }}</span>
-				<span class="stat done">Готово: {{ doneCount }}</span>
+				<span class="stat pending">Версия: {{ shownVersion || '—' }}</span>
+				<span class="stat done">Получено: {{ receivedCount }}</span>
 				<span v-if="errorCount" class="stat error">Ошибок: {{ errorCount }}</span>
 			</div>
 
 			<ul class="queue-list">
-				<li v-for="job in reversedJobs" :key="job.id" class="job" :class="job.status">
+				<li v-for="ev in reversedEvents" :key="ev.id" class="job" :class="ev.status">
 					<div class="job-row">
-						<span class="job-id">#{{ job.id }}</span>
-						<span class="job-params">x={{ job.x }}, y={{ job.y }}, z={{ job.z }}</span>
-						<span v-if="job.finishedAt" class="job-duration">{{ duration(job) }}</span>
-						<span class="badge" :class="job.status">{{ job.status }}</span>
+						<span class="job-id">v{{ ev.version }}</span>
+						<span class="job-params">{{ ev.params }}</span>
+						<span class="job-duration">{{ ev.time }}</span>
+						<span class="badge" :class="ev.status">{{ ev.status }}</span>
 					</div>
-					<div v-if="job.error" class="job-error">{{ job.error }}</div>
+					<div v-if="ev.error" class="job-error">{{ ev.error }}</div>
 				</li>
-				<li v-if="!jobs.length" class="empty">Запросов пока нет</li>
+				<li v-if="!events.length" class="empty">Моделей пока нет</li>
 			</ul>
 		</aside>
 	</div>

@@ -31,7 +31,9 @@ RUN --mount=type=bind,source=blender-linux-x64.tar.xz,target=/tmp/blender.tar.xz
 	          python/lib/python3.*/site-packages/pxr \
 	&& find /opt/blender -type d -name __pycache__ -prune -exec rm -rf {} +
 
-RUN --mount=type=cache,target=/root/.cache/pip pip install fastapi uvicorn
+# uvicorn[standard]: без WebSocket-библиотеки (websockets) uvicorn не примет рукопожатие /ws;
+# заодно watchfiles для --reload в dev
+RUN --mount=type=cache,target=/root/.cache/pip pip install fastapi "uvicorn[standard]"
 
 WORKDIR /app
 

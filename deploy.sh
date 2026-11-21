@@ -24,7 +24,7 @@ tar cf - --transform="s|^$COMPOSE_FILE\$|compose.yml|" "$COMPOSE_FILE" web/.env.
 	command -v docker >/dev/null || curl -fsSL https://get.docker.com | sudo sh
 	cd app
 	# по одному сервису: скачать, перезапустить, сразу удалить старый образ (экономит диск)
-	for s in gen php nginx; do
+	for s in gen mcp php nginx; do
 		sudo docker compose pull "$s"
 		sudo docker compose up -d --no-build "$s"
 		sudo docker image prune -f

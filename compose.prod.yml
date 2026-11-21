@@ -18,6 +18,7 @@ services:
     depends_on:
       - php
       - gen
+      - mcp
 
   php:
     image: d8m1kkz/blender-php:latest
@@ -45,6 +46,18 @@ services:
       - PYTHONUNBUFFERED=1
     logging: *default-logging
     restart: unless-stopped
+
+  mcp:
+    image: d8m1kkz/blender-mcp:latest
+    build:
+      context: ./mcp
+    environment:
+      - PYTHONUNBUFFERED=1
+      - GEN_WS=ws://gen:8080/ws
+    logging: *default-logging
+    restart: unless-stopped
+    depends_on:
+      - gen
 
 volumes:
   app-storage:
