@@ -4,13 +4,14 @@
 Каждый вызов инструмента — своё короткое соединение: сразу после подключения gen
 присылает текущую корзину, так что ни переподключений, ни своего состояния здесь не нужно.
 """
-import os, json, asyncio
+import os, json, math, asyncio
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
 import websockets
 from pydantic import BaseModel, Field
 from mcp.server import MCPServer
+from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
@@ -18,23 +19,35 @@ from mcp.server.transport_security import TransportSecuritySettings
 GEN_WS = os.environ.get("GEN_WS", "ws://gen:8080/ws") + "?glb=0"
 FIRST_MODEL_TIMEOUT = 30  # с, ждём текущую корзину (gen мог только что запуститься)
 RESULT_TIMEOUT = 60  # с, ждём актуальную модель после правки
+VIEW_TIMEOUT = 10  # с, ждём подтверждения правки вида (Blender не нужен, gen отвечает сразу)
+
+# Печать: PETG на Bambu Lab A1
+PETG_DENSITY = 1.27  # г/см³
+FILAMENT_DIAMETER = 1.75  # мм
+BUILD_VOLUME = 256  # мм, рабочая область A1 — куб 256×256×256
 
 mcp = MCPServer(
 	"basket",
 	instructions=(
 		"Управление общей 3D-корзиной, которую видят все открытые веб-интерфейсы. "
-		"Размеры в миллиметрах: x и y — длина и ширина (20–256, стол принтера Bambu Lab A1), "
-		"z — высота (20–150). Модель пересчитывается в Blender; новые размеры и модель "
-		"появляются у всех клиентов одновременно, когда расчёт закончен."
+		"Размеры в миллиметрах: width и length — ширина и длина (20–256, стол принтера Bambu Lab A1), "
+		"height — высота (20–150). Модель пересчитывается в Blender; новые размеры и модель "
+		"появляются у всех клиентов одновременно, когда расчёт закончен. "
+		"Кроме размеров есть общий «вид»: цвет модели, расстояние от камеры, ориентация модели "
+		"(повороты в градусах: rot_x — вокруг оси ширины, rot_y — вокруг вертикали, rot_z — вокруг оси длины; "
+		"модель всегда стоит на столе нижней точкой, так что rot_x=90 кладёт её на бок, rot_x=180 переворачивает) "
+		"и освещение (цвет и яркость), а также скорость вращения стола с моделью. "
+		"get_state — всё сразу, reset_view — вид по умолчанию, get_print_estimate — расход пластика, "
+		"get_model_glb — ссылка на скачивание текущей модели в GLB. Вид применяется мгновенно, без пересчёта в Blender."
 	),
 )
 
 
 class Basket(BaseModel):
 	version: int = Field(description="номер версии общей корзины")
-	x: float
-	y: float
-	z: float
+	width: float
+	length: float
+	height: float
 
 
 class SetResult(BaseModel):
@@ -46,7 +59,8 @@ class SetResult(BaseModel):
 
 
 def to_basket(msg: dict) -> Basket:
-	return Basket(version=msg["version"], x=msg["x"], y=msg["y"], z=msg["z"])
+	# Протокол gen называет размеры x/y/z: x — width, y — length, z — height
+	return Basket(version=msg["version"], width=msg["x"], length=msg["y"], height=msg["z"])
 
 
 async def recv_until(ws, predicate) -> dict:
@@ -93,24 +107,24 @@ async def get_basket() -> Basket:
 
 @mcp.tool()
 async def set_basket(
-	x: Annotated[float | None, Field(ge=20, le=256, description="длина, мм; не указано — оставить как есть")] = None,
-	y: Annotated[float | None, Field(ge=20, le=256, description="ширина, мм; не указано — оставить как есть")] = None,
-	z: Annotated[float | None, Field(ge=20, le=150, description="высота, мм; не указано — оставить как есть")] = None,
+	width: Annotated[float | None, Field(ge=20, le=256, description="ширина, мм; не указано — оставить как есть")] = None,
+	length: Annotated[float | None, Field(ge=20, le=256, description="длина, мм; не указано — оставить как есть")] = None,
+	height: Annotated[float | None, Field(ge=20, le=150, description="высота, мм; не указано — оставить как есть")] = None,
 ) -> SetResult:
 	"""Меняет размеры общей корзины и ждёт, пока все веб-клиенты получат новую модель.
 
 	Неуказанные размеры остаются прежними. Если за время расчёта корзину изменил
 	кто-то другой, вернётся status="superseded" и та корзина, которую видят все.
 	"""
-	if x is None and y is None and z is None:
-		raise ToolError("укажите хотя бы один из размеров: x, y или z")
+	if width is None and length is None and height is None:
+		raise ToolError("укажите хотя бы один из размеров: width, length или height")
 
 	async with connect() as ws:
 		cur = await current(ws)
 		params = {
-			"x": cur["x"] if x is None else x,
-			"y": cur["y"] if y is None else y,
-			"z": cur["z"] if z is None else z,
+			"x": cur["x"] if width is None else width,
+			"y": cur["y"] if length is None else length,
+			"z": cur["z"] if height is None else height,
 		}
 		await ws.send(json.dumps({"type": "params", **params, "seq": 1}))
 
@@ -136,6 +150,263 @@ async def set_basket(
 				f"правка принята как v{version}, но актуальная модель не появилась за {RESULT_TIMEOUT} с — "
 				"возможно, корзину непрерывно меняют из веб-интерфейса"
 			) from None
+
+
+# ── Общий вид: цвет, камера, ориентация, свет (мгновенно, без Blender) ──
+
+HEX_COLOR = r"^#[0-9a-fA-F]{6}$"
+
+
+class Color(BaseModel):
+	color: str = Field(description="цвет пластика модели, #RRGGBB")
+
+
+class Distance(BaseModel):
+	distance: float = Field(description="расстояние от камеры до центра стола, мм (больше — дальше)")
+
+
+class Orientation(BaseModel):
+	rot_x: float = Field(description="поворот вокруг оси ширины, градусы (±90 — лечь на бок, 180 — вверх дном)")
+	rot_y: float = Field(description="поворот вокруг вертикальной оси, градусы")
+	rot_z: float = Field(description="поворот вокруг оси длины, градусы")
+
+
+class Lighting(BaseModel):
+	color: str = Field(description="цвет направленного света, #RRGGBB")
+	brightness: float = Field(description="множитель яркости освещения: 1 — по умолчанию, 0 — темно")
+
+
+class Spin(BaseModel):
+	spin: float = Field(description="скорость вращения, градусы в секунду; 0 — не вращается, знак — направление")
+
+
+async def get_view() -> dict:
+	async with connect() as ws:
+		return await view_of(ws)
+
+
+async def view_of(ws) -> dict:
+	try:
+		async with asyncio.timeout(FIRST_MODEL_TIMEOUT):
+			return await recv_until(ws, lambda m: m["type"] == "view")
+	except TimeoutError:
+		raise ToolError("gen не прислал текущий вид") from None
+
+
+async def set_view(**patch) -> dict:
+	"""Шлёт частичную правку вида и ждёт, пока gen её применит и разошлёт (версия вида вырастет)."""
+	async with connect() as ws:
+		before = await view_of(ws)
+		await ws.send(json.dumps({"type": "view", **patch}))
+		try:
+			async with asyncio.timeout(VIEW_TIMEOUT):
+				return await recv_until(ws, lambda m: m["type"] == "view" and m["version"] > before["version"])
+		except TimeoutError:
+			raise ToolError("gen не подтвердил изменение вида — значения вне допустимых границ?") from None
+
+
+def to_orientation(v: dict) -> Orientation:
+	return Orientation(rot_x=v["rot_x"], rot_y=v["rot_y"], rot_z=v["rot_z"])
+
+
+def to_lighting(v: dict) -> Lighting:
+	return Lighting(color=v["light_color"], brightness=v["light_brightness"])
+
+
+@mcp.tool()
+async def get_color() -> Color:
+	"""Текущий цвет модели (#RRGGBB)."""
+	return Color(color=(await get_view())["color"])
+
+
+@mcp.tool()
+async def set_color(color: Annotated[str, Field(pattern=HEX_COLOR, description="цвет пластика, #RRGGBB, например #ff8800")]) -> Color:
+	"""Меняет цвет модели у всех веб-клиентов."""
+	return Color(color=(await set_view(color=color))["color"])
+
+
+@mcp.tool()
+async def get_distance() -> Distance:
+	"""Расстояние от камеры до центра стола, как его последний раз задали (мм).
+
+	Если кто-то приближал колесом мыши в браузере, у него расстояние локально другое.
+	"""
+	return Distance(distance=(await get_view())["distance"])
+
+
+@mcp.tool()
+async def set_distance(distance: Annotated[float, Field(ge=50, le=5000, description="расстояние, мм; больше — модель дальше")]) -> Distance:
+	"""Отодвигает или приближает камеру у всех веб-клиентов (направление взгляда сохраняется)."""
+	return Distance(distance=(await set_view(distance=distance))["distance"])
+
+
+@mcp.tool()
+async def get_orientation() -> Orientation:
+	"""Текущая ориентация модели в пространстве (повороты в градусах)."""
+	return to_orientation(await get_view())
+
+
+@mcp.tool()
+async def set_orientation(
+	rot_x: Annotated[float | None, Field(ge=-360, le=360, description="вокруг оси ширины, градусы; 90 — лечь на бок, 180 — перевернуть; не указано — оставить")] = None,
+	rot_y: Annotated[float | None, Field(ge=-360, le=360, description="вокруг вертикали, градусы; не указано — оставить")] = None,
+	rot_z: Annotated[float | None, Field(ge=-360, le=360, description="вокруг оси длины, градусы; не указано — оставить")] = None,
+) -> Orientation:
+	"""Поворачивает модель; абсолютные углы, не прибавка к текущим. Модель остаётся стоять на столе.
+
+	Неуказанные оси остаются прежними. Все нули — исходное положение.
+	"""
+	patch = {k: v for k, v in (("rot_x", rot_x), ("rot_y", rot_y), ("rot_z", rot_z)) if v is not None}
+	if not patch:
+		raise ToolError("укажите хотя бы один из углов: rot_x, rot_y или rot_z")
+	return to_orientation(await set_view(**patch))
+
+
+@mcp.tool()
+async def get_lighting() -> Lighting:
+	"""Текущие цвет и яркость освещения."""
+	return to_lighting(await get_view())
+
+
+@mcp.tool()
+async def set_lighting(
+	color: Annotated[str | None, Field(pattern=HEX_COLOR, description="цвет направленного света, #RRGGBB; не указано — оставить")] = None,
+	brightness: Annotated[float | None, Field(ge=0, le=10, description="множитель яркости: 1 — по умолчанию, 0 — темно, до 10; не указано — оставить")] = None,
+) -> Lighting:
+	"""Меняет цвет и/или яркость освещения у всех веб-клиентов. Неуказанное остаётся прежним.
+
+	Цвет окрашивает направленный свет; общий фон-«комната» нейтральный, поэтому оттенок деликатный.
+	"""
+	patch = {}
+	if color is not None:
+		patch["light_color"] = color
+	if brightness is not None:
+		patch["light_brightness"] = brightness
+	if not patch:
+		raise ToolError("укажите хотя бы одно: color или brightness")
+	return to_lighting(await set_view(**patch))
+
+
+@mcp.tool()
+async def get_spin() -> Spin:
+	"""Текущая скорость автовращения корзины (градусы в секунду)."""
+	return Spin(spin=(await get_view())["spin"])
+
+
+@mcp.tool()
+async def set_spin(spin: Annotated[float, Field(ge=-360, le=360, description="градусы в секунду; 0 — остановить; знак задаёт направление; по умолчанию −3.44")]) -> Spin:
+	"""Задаёт скорость вращения корзины на столе у всех веб-клиентов (0 останавливает)."""
+	return Spin(spin=(await set_view(spin=spin))["spin"])
+
+
+# ── Сводка, сброс, оценка печати, снимок ──
+
+class State(BaseModel):
+	basket: Basket = Field(description="размеры корзины, мм")
+	color: str = Field(description="цвет модели, #RRGGBB")
+	distance: float = Field(description="расстояние камеры, мм")
+	orientation: Orientation
+	lighting: Lighting
+	spin: float = Field(description="скорость вращения, градусы в секунду")
+
+
+class PrintEstimate(BaseModel):
+	version: int = Field(description="версия корзины, для которой посчитано")
+	volume_cm3: float = Field(description="объём пластика, см³ (сплошная модель, как напечатана при 100 % заполнения)")
+	mass_g: float = Field(description="масса PETG, г")
+	filament_m: float = Field(description="длина прутка 1,75 мм, м")
+	surface_cm2: float = Field(description="площадь поверхности, см²")
+	size_mm: list[float] = Field(description="габариты модели [ширина, длина, высота], мм")
+	fits_bed: bool = Field(description="помещается ли в рабочую область A1 (256×256×256 мм)")
+	open_edges: int = Field(description="незамкнутых рёбер сетки: 0 — замкнута; единицы-десятки на тысячи рёбер на объём почти не влияют")
+
+
+@mcp.tool()
+async def get_state() -> State:
+	"""Всё о корзине одним вызовом: размеры и весь вид (цвет, камера, ориентация, свет, вращение)."""
+	async with connect() as ws:
+		got = {}
+		try:
+			async with asyncio.timeout(FIRST_MODEL_TIMEOUT):
+				# После подключения gen шлёт и вид, и текущую модель — порядок не важен
+				while len(got) < 2:
+					msg = json.loads(await ws.recv())
+					if msg["type"] in ("model", "view"):
+						got[msg["type"]] = msg
+		except TimeoutError:
+			raise ToolError("gen не прислал текущее состояние — Blender ещё прогревается?") from None
+	v = got["view"]
+	return State(
+		basket=to_basket(got["model"]), color=v["color"], distance=v["distance"],
+		orientation=to_orientation(v), lighting=to_lighting(v), spin=v["spin"],
+	)
+
+
+@mcp.tool()
+async def reset_view() -> State:
+	"""Возвращает вид к умолчанию: цвет, камера, ориентация, свет и вращение. Размеры корзины не меняются."""
+	await set_view(reset=True)
+	return await get_state()
+
+
+@mcp.tool()
+async def get_print_estimate() -> PrintEstimate:
+	"""Расход PETG на печать текущей корзины: объём, масса, длина прутка, влезет ли на A1.
+
+	Считается по сетке сплошняком, без учёта заполнения, поддержек и юбки — для тонкостенной
+	корзины близко к правде, для толстых стенок слайсер даст меньше.
+	"""
+	async with connect() as ws:
+		msg = await current(ws)
+	stats = msg.get("stats")
+	if not stats:
+		raise ToolError("gen не прислал статистику модели — обновлён ли gen/worker.py?")
+	volume = stats["volume_mm3"]
+	size = [round(s, 1) for s in stats["size_mm"]]
+	filament_area = math.pi * (FILAMENT_DIAMETER / 2) ** 2  # мм²
+	return PrintEstimate(
+		version=msg["version"],
+		volume_cm3=round(volume / 1000, 2),
+		mass_g=round(volume / 1000 * PETG_DENSITY, 1),
+		filament_m=round(volume / filament_area / 1000, 2),
+		surface_cm2=round(stats["area_mm2"] / 100, 1),
+		size_mm=size,
+		fits_bed=all(s <= BUILD_VOLUME for s in size),
+		open_edges=stats["open_edges"],
+	)
+
+
+class ModelFile(BaseModel):
+	url: str = Field(description="ссылка на скачивание GLB")
+	version: int = Field(description="версия корзины на момент запроса")
+	basket: Basket
+	size_kb: float = Field(description="размер файла, КБ")
+
+
+def public_base(ctx: Context) -> str:
+	"""Адрес сайта, как его видит клиент: Host от nginx, схема — от caddy (X-Forwarded-Proto) в prod."""
+	req = ctx.request_context.request
+	if req is None or "host" not in req.headers:
+		raise ToolError("не удалось определить адрес сайта для ссылки")
+	proto = req.headers.get("x-forwarded-proto", req.url.scheme)
+	return f"{proto}://{req.headers['host']}"
+
+
+@mcp.tool()
+async def get_model_glb(ctx: Context) -> ModelFile:
+	"""Ссылка на скачивание текущей модели корзины в формате GLB (glTF, для просмотрщиков и Blender).
+
+	По ссылке всегда лежит актуальная модель: если корзину изменят до скачивания, придёт новая —
+	её версия и размеры есть в имени файла (basket_v<версия>_<ширина>x<длина>x<высота>.glb).
+	"""
+	async with connect() as ws:
+		msg = await current(ws)
+	return ModelFile(
+		url=f"{public_base(ctx)}/model.glb?v={msg['version']}",  # v — только против кэша, gen его не смотрит
+		version=msg["version"],
+		basket=to_basket(msg),
+		size_kb=round(msg.get("glb_bytes", 0) / 1024, 1),
+	)
 
 
 if __name__ == "__main__":

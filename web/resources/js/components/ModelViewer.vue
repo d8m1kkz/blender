@@ -69,8 +69,38 @@ const y = ref(100)
 const z = ref(50)
 
 // turntable — «поворотный столик»: в нём стол принтера и модель, автовращение крутит его целиком
-let scene, camera, renderer, controls, turntable, bed, currentModel, resizeObserver
+let scene, camera, renderer, controls, turntable, bed, currentModel, light, resizeObserver
 const loader = new GLTFLoader()
+
+// Общий вид (цвет, камера, ориентация, свет): приходит от gen сообщением «view», в том числе от MCP.
+// Здесь последнее полученное — новой модели сразу выставляется текущая ориентация.
+let viewState = null
+let rotationSpeed = ROTATION_SPEED // автовращение, радиан за кадр; меняется сообщением «view»
+
+// Применяет общий вид к сцене. Модель при повороте остаётся «на столе»: стол уходит под её нижнюю точку.
+const applyView = (v) => {
+	viewState = v
+	rotationSpeed = THREE.MathUtils.degToRad(v.spin) / 60 // из градусов в секунду (кадр ≈ 1/60 с)
+	petgMaterial.color.set(v.color)
+	light.color.set(v.light_color)
+	light.intensity = LIGHT_INTENSITY * v.light_brightness
+	scene.environmentIntensity = ENVIRONMENT_INTENSITY * v.light_brightness
+	if (currentModel) {
+		orientModel(currentModel)
+		layerUniforms.uLayerBase.value = placeBed(bed, currentModel)
+	}
+	// Камера: то же направление на цель, другая дистанция
+	const offset = camera.position.clone().sub(controls.target)
+	camera.position.copy(controls.target).addScaledVector(offset.normalize(), v.distance)
+	controls.update()
+}
+
+// Ориентация модели: повороты вокруг осей сцены (X — вдоль ширины, Y — вверх, Z — вдоль длины)
+const orientModel = (model) => {
+	if (!viewState) return
+	const deg = THREE.MathUtils.degToRad
+	model.rotation.set(deg(viewState.rot_x), deg(viewState.rot_y), deg(viewState.rot_z))
+}
 
 // ── Связь с генератором: WebSocket, одна общая корзина на всех клиентов ──
 // Сервер нумерует каждую правку любого клиента (version) и присылает модель вместе с x/y/z,
@@ -210,6 +240,7 @@ const showModel = async (header, buffer) => {
 	}
 	currentModel = gltf.scene
 	prepareModel(currentModel)
+	orientModel(currentModel)
 	// Слои печати отсчитываются от дна модели (той же высоты, где стоит стол)
 	layerUniforms.uLayerBase.value = placeBed(bed, currentModel)
 	turntable.add(currentModel)
@@ -239,6 +270,8 @@ const onMessage = (data) => {
 		lastAck.value = msg.version
 	} else if (msg.type === 'model') {
 		pendingHeader = msg
+	} else if (msg.type === 'view') {
+		applyView(msg)
 	} else if (msg.type === 'error') {
 		settledVersion.value = Math.max(settledVersion.value, msg.version)
 		errorCount.value++
@@ -467,7 +500,7 @@ onMounted(() => {
 
 	// Базовое освещение сцены
 	// Тёплый основной свет: цветовой контраст с холодным «окном» делает освещение живее
-	const light = new THREE.DirectionalLight(LIGHT_COLOR, LIGHT_INTENSITY)
+	light = new THREE.DirectionalLight(LIGHT_COLOR, LIGHT_INTENSITY)
 	// Свет и окружение закреплены в мире (как в комнате): при вращении вида освещение на модели меняется.
 	// Начальное положение света считаем относительно стартовой камеры, затем переводим в мировые координаты.
 	camera.updateMatrixWorld()
@@ -500,7 +533,7 @@ onMounted(() => {
 	// Цикл рендеринга с медленным вращением для наглядности
 	const animate = () => {
 		requestAnimationFrame(animate)
-		turntable.rotation.y += ROTATION_SPEED
+		turntable.rotation.y += rotationSpeed
 		controls.update()
 		renderer.render(scene, camera)
 	}

@@ -1,4 +1,4 @@
-import os, json, uuid, asyncio, subprocess
+import os, re, json, uuid, asyncio, subprocess
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
@@ -12,7 +12,25 @@ worker = None
 # state — желаемые параметры: последняя правка любого клиента; version растёт с каждой правкой.
 # Стартуем с version=1 и дефолтами клиента, чтобы модель была готова к первому подключению.
 state = {"version": 1, "x": 100.0, "y": 100.0, "z": 50.0}
-ready = None       # последняя опубликованная (актуальная) модель: {version, x, y, z, glb}
+# view — общий «вид»: цвет, камера, ориентация модели, свет. Blender не нужен, поэтому правка
+# рассылается сразу; свой version, независимый от version корзины. Дефолты совпадают с клиентом.
+VIEW_DEFAULTS = {
+	"color": "#29a546",          # цвет пластика модели
+	"distance": 612.4,           # расстояние от камеры до центра стола, мм
+	"rot_x": 0.0, "rot_y": 0.0, "rot_z": 0.0,  # ориентация модели, градусы вокруг осей сцены
+	"light_color": "#fff0dd",    # цвет направленного света
+	"light_brightness": 1.0,     # множитель яркости всего освещения (1 — как по умолчанию)
+	"spin": -3.44,               # автовращение стола с моделью, градусы в секунду (0 — стоит)
+}
+view = {"version": 1, **VIEW_DEFAULTS}
+VIEW_RANGES = {
+	"distance": (50, 5000),
+	"rot_x": (-360, 360), "rot_y": (-360, 360), "rot_z": (-360, 360),
+	"light_brightness": (0, 10),
+	"spin": (-360, 360),
+}
+VIEW_COLORS = ("color", "light_color")
+ready = None       # последняя опубликованная (актуальная) модель: {version, x, y, z, stats, glb}
 last_error = None  # последняя ошибка актуальной версии: {version, error}
 done_version = 0   # последняя обработанная циклом версия (опубликованная, выброшенная или с ошибкой)
 # Будит цикл генерации и отправителей всех соединений при любом изменении
@@ -67,8 +85,8 @@ async def call_worker(payload: dict) -> dict:
 		writer.close()
 
 
-async def render(snap: dict) -> bytes:
-	"""Генерирует модель по снимку параметров и возвращает GLB байтами."""
+async def render(snap: dict) -> tuple[bytes, dict]:
+	"""Генерирует модель по снимку параметров: GLB байтами и статистика сетки от воркера."""
 	out = f"/dev/shm/m_{uuid.uuid4().hex}.glb"
 	payload = {"x": snap["x"], "y": snap["y"], "z": snap["z"], "out": out}
 	try:
@@ -84,7 +102,7 @@ async def render(snap: dict) -> bytes:
 		if not resp.get("ok"):
 			raise RuntimeError(resp.get("error", "unknown error"))
 		with open(out, "rb") as f:
-			return f.read()
+			return f.read(), resp.get("stats", {})
 	finally:
 		remove_file(out)
 
@@ -99,9 +117,9 @@ async def generation_loop():
 
 		# Blender считает до конца, не прерываем; правки тем временем копятся в state
 		try:
-			glb, error = await render(snap), None
+			(glb, stats), error = await render(snap), None
 		except Exception as e:
-			glb, error = None, f"{type(e).__name__}: {e}"
+			glb, stats, error = None, None, f"{type(e).__name__}: {e}"
 
 		async with changed:
 			done_version = snap["version"]
@@ -110,7 +128,7 @@ async def generation_loop():
 				print(f"v{snap['version']} устарела (уже v{state['version']}), не отправляем", flush=True)
 				continue
 			if error is None:
-				ready = {**snap, "glb": glb}
+				ready = {**snap, "stats": stats, "glb": glb}
 				print(f"v{snap['version']} готова, рассылаем", flush=True)
 			else:
 				last_error = {"version": snap["version"], "error": error}
@@ -137,16 +155,43 @@ app.add_middleware(
 )
 
 
+def parse_view(msg: dict) -> dict:
+	"""Частичная правка вида: проверяет поля, ValueError — если что-то неверно или полей нет.
+
+	reset: true — вернуть всё к умолчаниям (остальные поля сообщения тогда не смотрим).
+	"""
+	if msg.get("reset") is True:
+		return dict(VIEW_DEFAULTS)
+	patch = {}
+	for key in VIEW_COLORS:
+		if key in msg:
+			value = msg[key]
+			if not (isinstance(value, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", value)):
+				raise ValueError(f"{key}: ожидается #RRGGBB")
+			patch[key] = value.lower()
+	for key, (lo, hi) in VIEW_RANGES.items():
+		if key in msg:
+			value = float(msg[key])
+			if not lo <= value <= hi:  # заодно отсекает NaN
+				raise ValueError(f"{key}: вне диапазона {lo}…{hi}")
+			patch[key] = value
+	if not patch:
+		raise ValueError("нет полей вида")
+	return patch
+
+
 async def send_loop(ws: WebSocket, conn: dict):
 	"""Единственный, кто пишет в это соединение: порядок «model → бинарный кадр» не нарушится."""
 	sent_ack = 0
 	sent_model = 0
+	sent_view = 0
 	# Старые ошибки новому клиенту не показываем — только те, что случатся при нём
 	sent_error = last_error["version"] if last_error else 0
 
 	def has_news():
 		return (
 			conn["ack"] > sent_ack
+			or view["version"] > sent_view
 			or (ready is not None and ready["version"] > sent_model)
 			or (last_error is not None and last_error["version"] > sent_error)
 		)
@@ -158,6 +203,11 @@ async def send_loop(ws: WebSocket, conn: dict):
 			async with changed:
 				await changed.wait_for(has_news)
 				ack, seq, model, error = conn["ack"], conn["seq"], ready, last_error
+				view_snap = dict(view)
+
+			if view_snap["version"] > sent_view:
+				await ws.send_json({"type": "view", **view_snap})
+				sent_view = view_snap["version"]
 
 			# Несколько быстрых правок могут получить один ack: seq — номер последней из них у клиента
 			if ack > sent_ack:
@@ -168,6 +218,8 @@ async def send_loop(ws: WebSocket, conn: dict):
 					"type": "model",
 					"version": model["version"],
 					"x": model["x"], "y": model["y"], "z": model["z"],
+					"stats": model["stats"],
+				"glb_bytes": len(model["glb"]),
 				})
 				if conn["glb"]:
 					await ws.send_bytes(model["glb"])
@@ -191,12 +243,22 @@ async def ws_endpoint(ws: WebSocket):
 		while True:
 			try:
 				msg = json.loads(await ws.receive_text())
-				if msg.get("type") != "params":
+				kind = msg.get("type")
+				if kind == "view":
+					patch = parse_view(msg)
+				elif kind == "params":
+					x, y, z = float(msg["x"]), float(msg["y"]), float(msg["z"])
+					seq = int(msg.get("seq", 0))
+				else:
 					continue
-				x, y, z = float(msg["x"]), float(msg["y"]), float(msg["z"])
-				seq = int(msg.get("seq", 0))
 			except (ValueError, KeyError, TypeError, AttributeError):
 				continue  # битое сообщение пропускаем, соединение не рвём
+			if kind == "view":
+				async with changed:
+					view.update(patch)
+					view["version"] += 1
+					changed.notify_all()
+				continue
 			async with changed:
 				state["version"] += 1
 				state.update(x=x, y=y, z=z)
@@ -210,11 +272,19 @@ async def ws_endpoint(ws: WebSocket):
 
 @app.get("/model")
 async def model():
-	"""Текущая опубликованная модель — для отладки (в dev: http://localhost:8080/model)."""
+	"""Текущая опубликованная модель: через nginx — /model.glb (ссылку выдаёт MCP), в dev ещё :8080/model.
+
+	Отдаём ту, что актуальна в момент скачивания: размеры и версия — в имени файла.
+	"""
 	if ready is None:
 		raise HTTPException(503, "модель ещё не готова")
+	name = f"basket_v{ready['version']}_{ready['x']:g}x{ready['y']:g}x{ready['z']:g}.glb"
 	return Response(
 		content=ready["glb"],
 		media_type="model/gltf-binary",
-		headers={"X-Version": str(ready["version"])},
+		headers={
+			"X-Version": str(ready["version"]),
+			"Content-Disposition": f'attachment; filename="{name}"',
+			"Cache-Control": "no-store",  # по тому же адресу после правки будет другая модель
+		},
 	)

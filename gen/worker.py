@@ -1,5 +1,5 @@
 """Постоянно запущенный Blender-воркер."""
-import bpy, os, json, socket, time, traceback
+import bpy, bmesh, os, json, socket, time, traceback
 
 SOCK_PATH = os.environ.get("BLENDER_SOCK", "/dev/shm/blender.sock")
 # Искусственная добавка к времени расчёта модели, секунды (0 — без задержки)
@@ -8,7 +8,29 @@ EXTRA_DELAY = 0
 obj = bpy.data.objects['Basket']
 dimensions = bpy.data.node_groups["_dimensions"];
 
+def mesh_stats(mesh):
+	"""Объём, площадь и габариты сетки (единицы сцены = мм). Объём честный только у замкнутой сетки.
+
+	Geometry Nodes собирают корзину из кусков, стыкующихся совпадающими вершинами: склеиваем их
+	(только в копии для подсчёта, экспорт не трогаем), иначе каждый стык считался бы открытым краем.
+	"""
+	bm = bmesh.new()
+	try:
+		bm.from_mesh(mesh)
+		bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=1e-4)
+		coords = [v.co for v in bm.verts]
+		return {
+			"volume_mm3": abs(bm.calc_volume()),
+			"area_mm2": sum(f.calc_area() for f in bm.faces),
+			"size_mm": [max(c[i] for c in coords) - min(c[i] for c in coords) for i in range(3)],
+			"open_edges": sum(1 for e in bm.edges if not e.is_manifold),
+		}
+	finally:
+		bm.free()
+
+
 def generate(x, y, z, out):
+	"""Пересчитывает корзину, пишет GLB в out и возвращает статистику сетки."""
 	dimensions.nodes["Value"].outputs[0].default_value = x
 	dimensions.nodes["Value.001"].outputs[0].default_value = y
 	dimensions.nodes["Group Output"].inputs[3].default_value = z
@@ -21,6 +43,7 @@ def generate(x, y, z, out):
 	mesh_data = bpy.data.meshes.new_from_object(eval_obj, preserve_all_data_layers=True, depsgraph=depsgraph)
 	export_obj = bpy.data.objects.new("ExportTemp", mesh_data)
 	try:
+		stats = mesh_stats(mesh_data)
 		bpy.context.scene.collection.objects.link(export_obj)
 		# Без bpy.ops.object.select_all: в фоновом режиме у него падает poll() по контексту
 		for o in bpy.context.view_layer.objects:
@@ -33,6 +56,7 @@ def generate(x, y, z, out):
 			export_format='GLB',
 			use_selection=True
 		)
+		return stats
 	finally:
 		# Сцена живёт между запросами, поэтому временные данные убираем сразу
 		bpy.data.objects.remove(export_obj, do_unlink=True)
@@ -46,9 +70,9 @@ def handle(conn):
 			return
 		try:
 			req = json.loads(line)
-			generate(float(req["x"]), float(req["y"]), float(req["z"]), req["out"])
+			stats = generate(float(req["x"]), float(req["y"]), float(req["z"]), req["out"])
 			time.sleep(EXTRA_DELAY)  # имитация долгого расчёта; прогрев её не затрагивает
-			resp = {"ok": True}
+			resp = {"ok": True, "stats": stats}
 		except Exception as e:
 			traceback.print_exc()
 			resp = {"ok": False, "error": f"{type(e).__name__}: {e}"}
