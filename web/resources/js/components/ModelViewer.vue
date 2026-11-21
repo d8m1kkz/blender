@@ -4,6 +4,63 @@ import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
+// ── Константы ──
+
+// Очередь запросов
+const MAX_HISTORY = 20
+
+// Прогрев Blender (повтор запроса, мс)
+const WARMUP_RETRY_DELAY = 500
+const WARMUP_MAX_WAIT = 90000
+
+// Слои печати
+const LAYER_HEIGHT = 0.2 // толщина слоя, мм (единицы сцены)
+const LAYER_DEPTH = 0.01 // глубина бороздки между слоями, мм
+// Затухание против ряби: полоски видны, только когда слой занимает достаточно пикселей.
+const LAYER_FADE_FROM_PX = 3 // меньше стольких пикселей на слой — полосок нет совсем
+const LAYER_FADE_TO_PX = 20 // от стольких пикселей на слой — полоски видны полностью
+
+// Рендер и освещение
+const MAX_PIXEL_RATIO = 2 // предел плотности пикселей (экономит GPU на retina)
+const TONE_MAPPING_EXPOSURE = 1 // экспозиция сцены: общая яркость
+const ENVIRONMENT_INTENSITY = 5 // сила света от «комнаты» (IBL)
+const LIGHT_COLOR = 0xfff0dd // цвет направленного света (тёплый)
+const LIGHT_INTENSITY = 1 // интенсивность направленного света
+const LIGHT_ANGLE = THREE.MathUtils.degToRad(20) // отклонение света от взгляда камеры
+
+// Стол принтера
+const BED_SIZE = 256 // стол Bambu Lab A1: 256×256 (единицы сцены = мм)
+const BED_CELL = 25 // шаг сетки
+
+
+// Материал PETG: зелёный глянцевый пластик с лёгким лаковым слоем (блики от печати/самого пластика).
+// Один общий материал на все меши модели; цвет и шероховатость подбираются здесь.
+const petgMaterial = new THREE.MeshPhysicalMaterial({
+	color: 0x29A546,
+	metalness: 0,
+	roughness: 0.5,
+	clearcoat: 0.3,
+	clearcoatRoughness: 0.8,
+})
+
+// Стены «комнаты»: градиент сверху вниз, [позиция 0..1, цвет]
+// Нейтральные — для освещения (IBL)
+const ROOM_WALLS_LIGHTING = [
+	[0, '#5c616b'], // потолок
+	[0.35, '#474c55'],
+	[0.5, '#3a3e46'], // горизонт
+	[0.7, '#2a2c32'],
+	[1, '#1d1e22'], // пол
+]
+// В цвет карточек интерфейса (#1e2d44 → #16212f) — для видимого фона
+const ROOM_WALLS_BACKGROUND = [
+	[0, '#34496a'], // потолок
+	[0.35, '#263753'],
+	[0.5, '#1e2d44'], // горизонт
+	[0.7, '#16212f'],
+	[1, '#0e1520'], // пол
+]
+
 const canvasContainer = ref(null)
 const x = ref(100)
 const y = ref(100)
@@ -14,7 +71,6 @@ let scene, camera, renderer, controls, turntable, bed, currentModel, resizeObser
 const loader = new GLTFLoader()
 
 // Журнал очереди запросов (для отладки)
-const MAX_HISTORY = 20
 const jobs = ref([])
 let nextId = 1
 let processing = false
@@ -37,8 +93,6 @@ const trimHistory = () => {
 const duration = (job) => (job.finishedAt ? `${job.finishedAt - job.startedAt} мс` : '')
 
 // Пока gen прогревает Blender, nginx отвечает 502/503/504 — это временно, повторяем запрос
-const WARMUP_RETRY_DELAY = 500
-const WARMUP_MAX_WAIT = 90000
 const warmingUp = ref(false)
 
 const isNotReady = (e) => /responded with (502|503|504)\b/.test(e?.message || '')
@@ -62,25 +116,9 @@ const loadWithWarmup = async (url) => {
 	}
 }
 
-// Материал PETG: зелёный глянцевый пластик с лёгким лаковым слоем (блики от печати/самого пластика).
-// Один общий материал на все меши модели; цвет и шероховатость подбираются здесь.
-const petgMaterial = new THREE.MeshPhysicalMaterial({
-	color: 0x24663a,
-	metalness: 0,
-	roughness: 0.38,
-	clearcoat: 0.3,
-	clearcoatRoughness: 0.3,
-})
-
 // Слои 3D-печати: процедурный рельеф в шейдере, без текстуры и UV.
 // Высота «валика» слоя зависит только от мировой Y, поэтому полоски всегда горизонтальны.
 // Геометрия не меняется — отклоняется только нормаль (как у bump-карты), рельеф «рисует» свет.
-const LAYER_HEIGHT = 0.2 // толщина слоя, мм (единицы сцены)
-const LAYER_DEPTH = 0.003 // глубина бороздки между слоями, мм
-// Затухание против ряби: полоски видны, только когда слой занимает достаточно пикселей.
-const LAYER_FADE_FROM_PX = 4 // меньше стольких пикселей на слой — полосок нет совсем
-const LAYER_FADE_TO_PX = 20 // от стольких пикселей на слой — полоски видны полностью
-
 const layerUniforms = {
 	uLayerHeight: { value: LAYER_HEIGHT },
 	uLayerDepth: { value: LAYER_DEPTH },
@@ -253,23 +291,6 @@ const onKeydown = (e) => {
 // Положение на картинке: x — азимут (0.5 = направление +X, 0.75 = +Z), y — высота (0 = потолок, 0.5 = горизонт).
 // walls — градиент стен сверху вниз: [позиция 0..1, цвет].
 
-// Нейтральные стены — для освещения (IBL)
-const ROOM_WALLS_LIGHTING = [
-	[0, '#5c616b'], // потолок
-	[0.35, '#474c55'],
-	[0.5, '#3a3e46'], // горизонт
-	[0.7, '#2a2c32'],
-	[1, '#1d1e22'], // пол
-]
-// Стены в цвет карточек интерфейса (#1e2d44 → #16212f) — для видимого фона
-const ROOM_WALLS_BACKGROUND = [
-	[0, '#34496a'], // потолок
-	[0.35, '#263753'],
-	[0.5, '#1e2d44'], // горизонт
-	[0.7, '#16212f'],
-	[1, '#0e1520'], // пол
-]
-
 const makeRoomEnvironment = (walls = ROOM_WALLS_LIGHTING) => {
 	const W = 1024
 	const H = 512
@@ -304,8 +325,6 @@ const makeRoomEnvironment = (walls = ROOM_WALLS_LIGHTING) => {
 
 // Прозрачный стол 3D-принтера: стеклянная пластина с сеткой в цветах интерфейса.
 // Прозрачный и не пишет глубину — сквозь него видно дно корзины, если посмотреть снизу.
-const BED_SIZE = 256 // стол Bambu Lab A1: 256×256 (единицы сцены = мм)
-const BED_CELL = 25 // шаг сетки
 
 const makeBedTexture = (renderer) => {
 	const S = 64 // одна клетка; текстура повторяется по пластине
@@ -387,11 +406,11 @@ onMounted(() => {
 
 	renderer = new THREE.WebGLRenderer({ antialias: true })
 	// Чёткость на экранах с высокой плотностью, но не больше 2x (экономим GPU на планшетах)
-	renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+	renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_PIXEL_RATIO))
 	renderer.setSize(width, height)
 	// Тон-маппинг: без пересветов, плавные переходы как у камеры
 	renderer.toneMapping = THREE.ACESFilmicToneMapping
-	renderer.toneMappingExposure = 1.0
+	renderer.toneMappingExposure = TONE_MAPPING_EXPOSURE
 	canvasContainer.value.appendChild(renderer.domElement)
 
 	// Управление видом: колесо/щипок — масштаб, ЛКМ/один палец — перемещение,
@@ -405,14 +424,13 @@ onMounted(() => {
 
 	// Базовое освещение сцены
 	// Тёплый основной свет: цветовой контраст с холодным «окном» делает освещение живее
-	const light = new THREE.DirectionalLight(0xfff0dd, 1.4)
+	const light = new THREE.DirectionalLight(LIGHT_COLOR, LIGHT_INTENSITY)
 	// Свет и окружение закреплены в мире (как в комнате): при вращении вида освещение на модели меняется.
 	// Начальное положение света считаем относительно стартовой камеры, затем переводим в мировые координаты.
 	camera.updateMatrixWorld()
 	const targetLocal = camera.worldToLocal(new THREE.Vector3(0, 0, 0))
 	// Свет падает почти от зрителя: луч отклонён от направления взгляда на LIGHT_ANGLE
 	// вправо и вверх (диагональ 45°). Меняйте LIGHT_ANGLE, чтобы сделать свет косее или прямее.
-	const LIGHT_ANGLE = THREE.MathUtils.degToRad(10)
 	const dist = targetLocal.length()
 	const side = dist * Math.sin(LIGHT_ANGLE) * Math.SQRT1_2
 	light.position.copy(camera.localToWorld(new THREE.Vector3(side, side, targetLocal.z + dist * Math.cos(LIGHT_ANGLE))))
@@ -421,7 +439,7 @@ onMounted(() => {
 
 	// Карта окружения (IBL) — нарисованная «комната». Строится один раз, на кадры почти не влияет.
 	scene.environment = makeRoomEnvironment()
-	scene.environmentIntensity = 2
+	scene.environmentIntensity = ENVIRONMENT_INTENSITY
 
 	// Фон — та же комната (окно и лампа на тех же местах), но в цветах карточек и размытая.
 	// Освещение при этом не меняется: для него используется нейтральная комната выше.

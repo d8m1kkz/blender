@@ -26,9 +26,8 @@ Laravel (`web/`) сейчас лишь отдаёт страницу `welcome.bl
 | Путь | Назначение |
 |---|---|
 | `web/` | Laravel 13 (PHP ^8.3, образ на PHP 8.5-fpm), Vite 8, Vue 3, Tailwind 4, Three.js |
-| `web/resources/js/app.js` | Точка входа: регистрирует компоненты `counter-control` и `model-viewer`, монтирует `#app` |
+| `web/resources/js/app.js` | Точка входа: регистрирует компонент `model-viewer`, монтирует `#app` |
 | `web/resources/js/components/ModelViewer.vue` | Основной UI: слайдеры/поля x, y, очередь запросов, рендер GLB через `GLTFLoader` |
-| `web/resources/js/components/CounterControl.vue` | Демо-компонент счётчика (не используется в `welcome.blade.php`) |
 | `web/resources/views/welcome.blade.php` | Рабочая страница с `<model-viewer>`; `welcome1.blade.php` — запасной/старый вариант |
 | `gen/` | Python-сервис генерации: `web.py` (FastAPI), `worker.py` (долгоживущий Blender), `basket.blend` (сцена), `.dockerignore` |
 | `web/nginx.conf` | Конфиг nginx: `location = /generate` → `gen:8080`, остальное → php-fpm (`php:9000`), root `public/`. В dev монтируется томом, в prod копируется в образ `web` (`COPY nginx.conf`) |
