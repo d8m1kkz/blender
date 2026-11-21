@@ -11,8 +11,7 @@ services:
     build:
       context: ./web
       target: web
-    ports:
-      - "80:80"
+    # Порты наружу не публикуются: снаружи вход один — caddy (80/443), он проксирует сюда
     logging: *default-logging
     restart: unless-stopped
     depends_on:
@@ -59,5 +58,23 @@ services:
     depends_on:
       - gen
 
+  # HTTPS: сам получает и продлевает сертификат Let's Encrypt для SITE_HOST (<IP>.sslip.io;
+  # deploy.sh кладёт SITE_HOST в .env на VPS). Порт 80 нужен для проверки домена и редиректа на HTTPS.
+  caddy:
+    image: caddy:2
+    command: caddy reverse-proxy --from ${SITE_HOST:-localhost} --to nginx:80
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy-data:/data # сертификаты: без тома выпускались бы заново при каждом пересоздании (лимиты Let's Encrypt)
+      - caddy-config:/config
+    logging: *default-logging
+    restart: unless-stopped
+    depends_on:
+      - nginx
+
 volumes:
   app-storage:
+  caddy-data:
+  caddy-config:
