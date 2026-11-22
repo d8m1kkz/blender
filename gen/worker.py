@@ -29,11 +29,44 @@ def mesh_stats(mesh):
 		bm.free()
 
 
-def generate(x, y, z, out):
-	"""Пересчитывает корзину, пишет GLB в out и возвращает статистику сетки."""
-	dimensions.nodes["Value"].outputs[0].default_value = x
-	dimensions.nodes["Value.001"].outputs[0].default_value = y
-	dimensions.nodes["Group Output"].inputs[3].default_value = z
+# Реестр параметров сцены: имя параметра → сокет в группе нод, где лежит его значение.
+# Через один и тот же сокет значение и задаём, и читаем обратно (read_params).
+# Новый параметр = одна строка здесь; сигнатуры generate/handle и протокол не меняются.
+PARAMS = {
+	"x": lambda: dimensions.nodes["Value"].outputs[0],
+	"y": lambda: dimensions.nodes["Value.001"].outputs[0],
+	"z": lambda: dimensions.nodes["Group Output"].inputs[3],
+	"thickness": lambda: dimensions.nodes["Group Output"].inputs[5],
+	"excavation_height": lambda: dimensions.nodes["Group Output"].inputs[6],
+	"perforation_wall": lambda: dimensions.nodes["Group Output"].inputs[7],
+	"perforation_floor": lambda: dimensions.nodes["Group Output"].inputs[8],
+}
+
+def apply_params(params):
+	"""Записывает параметры в сцену. Неуказанные остаются как были (сцена живёт между запросами)."""
+	unknown = params.keys() - PARAMS.keys()
+	if unknown:
+		raise KeyError(f"неизвестные параметры: {', '.join(sorted(unknown))}")
+	for name, value in params.items():
+		sock = PARAMS[name]()
+		# Протокол присылает числа, а тип сокета (float/int/bool) задаёт сцена — приводим к нему
+		sock.default_value = type(sock.default_value)(value)
+
+
+def read_params():
+	"""Значения всех параметров, как они сейчас стоят в сцене (в т.ч. не заданные клиентами — из basket.blend)."""
+	values = {}
+	for name, socket in PARAMS.items():
+		value = socket().default_value
+		# Blender хранит float32: 33.3 читается как 33.29999923706055 — округляем до десятитысячных
+		values[name] = round(value, 4) if isinstance(value, float) else value
+	return values
+
+
+def generate(params, out):
+	"""Применяет params (dict имя → значение), пишет GLB в out; возвращает статистику сетки и значения параметров."""
+	apply_params(params)
+	values = read_params()
 	# Значения поменялись в уже загруженной сцене: помечаем объект и пересчитываем граф
 	obj.update_tag()
 	bpy.context.view_layer.update()
@@ -56,7 +89,7 @@ def generate(x, y, z, out):
 			export_format='GLB',
 			use_selection=True
 		)
-		return stats
+		return stats, values
 	finally:
 		# Сцена живёт между запросами, поэтому временные данные убираем сразу
 		bpy.data.objects.remove(export_obj, do_unlink=True)
@@ -70,9 +103,10 @@ def handle(conn):
 			return
 		try:
 			req = json.loads(line)
-			stats = generate(float(req["x"]), float(req["y"]), float(req["z"]), req["out"])
+			out = req.pop("out")
+			stats, values = generate({k: float(v) for k, v in req.items()}, out)
 			time.sleep(EXTRA_DELAY)  # имитация долгого расчёта; прогрев её не затрагивает
-			resp = {"ok": True, "stats": stats}
+			resp = {"ok": True, "stats": stats, "params": values}
 		except Exception as e:
 			traceback.print_exc()
 			resp = {"ok": False, "error": f"{type(e).__name__}: {e}"}
@@ -81,7 +115,7 @@ def handle(conn):
 
 
 # Прогрев: первый экспорт импортирует glTF-аддон. Делаем это до публикации сокета
-generate(100.0, 100.0, 100.0, "/dev/shm/m_warmup.glb")
+generate({"x": 100.0, "y": 100.0, "z": 100.0}, "/dev/shm/m_warmup.glb")
 os.remove("/dev/shm/m_warmup.glb")
 
 if os.path.exists(SOCK_PATH):

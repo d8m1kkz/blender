@@ -12,11 +12,14 @@ worker = None
 # state — желаемые параметры: последняя правка любого клиента; version растёт с каждой правкой.
 # Стартуем с version=1 и дефолтами клиента, чтобы модель была готова к первому подключению.
 state = {"version": 1, "x": 100.0, "y": 100.0, "z": 50.0}
+# Параметры модели, которые клиенты могут менять (имена — как в PARAMS у gen/worker.py).
+# Правка может прийти частичной; что ещё никто не задавал, в state нет — Blender берёт своё из basket.blend.
+PARAM_KEYS = ("x", "y", "z", "thickness", "excavation_height", "perforation_wall", "perforation_floor")
 # view — общий «вид»: цвет, камера, ориентация модели, свет. Blender не нужен, поэтому правка
 # рассылается сразу; свой version, независимый от version корзины. Дефолты совпадают с клиентом.
 VIEW_DEFAULTS = {
 	"color": "#29a546",          # цвет пластика модели
-	"distance": 612.4,           # расстояние от камеры до центра стола, мм
+	"distance": 1300.0,          # расстояние от камеры до центра стола, мм (модель 100×100 целиком влезает и в узкий экран телефона)
 	"rot_x": 0.0, "rot_y": 0.0, "rot_z": 0.0,  # ориентация модели, градусы вокруг осей сцены
 	"light_color": "#fff0dd",    # цвет направленного света
 	"light_brightness": 1.0,     # множитель яркости всего освещения (1 — как по умолчанию)
@@ -30,7 +33,7 @@ VIEW_RANGES = {
 	"spin": (-360, 360),
 }
 VIEW_COLORS = ("color", "light_color")
-ready = None       # последняя опубликованная (актуальная) модель: {version, x, y, z, stats, glb}
+ready = None       # последняя опубликованная (актуальная) модель: {version, <PARAM_KEYS из Blender>, stats, glb}
 last_error = None  # последняя ошибка актуальной версии: {version, error}
 done_version = 0   # последняя обработанная циклом версия (опубликованная, выброшенная или с ошибкой)
 # Будит цикл генерации и отправителей всех соединений при любом изменении
@@ -85,10 +88,11 @@ async def call_worker(payload: dict) -> dict:
 		writer.close()
 
 
-async def render(snap: dict) -> tuple[bytes, dict]:
-	"""Генерирует модель по снимку параметров: GLB байтами и статистика сетки от воркера."""
+async def render(snap: dict) -> tuple[bytes, dict, dict]:
+	"""Генерирует модель по снимку параметров: GLB байтами, статистика сетки и значения параметров из Blender."""
 	out = f"/dev/shm/m_{uuid.uuid4().hex}.glb"
-	payload = {"x": snap["x"], "y": snap["y"], "z": snap["z"], "out": out}
+	# Шлём все заданные параметры, а не только изменённые: перезапущенный воркер начинает со сцены из файла
+	payload = {k: v for k, v in snap.items() if k in PARAM_KEYS} | {"out": out}
 	try:
 		try:
 			if worker is None or worker.poll() is not None:
@@ -102,7 +106,7 @@ async def render(snap: dict) -> tuple[bytes, dict]:
 		if not resp.get("ok"):
 			raise RuntimeError(resp.get("error", "unknown error"))
 		with open(out, "rb") as f:
-			return f.read(), resp.get("stats", {})
+			return f.read(), resp.get("stats", {}), resp.get("params", {})
 	finally:
 		remove_file(out)
 
@@ -117,9 +121,10 @@ async def generation_loop():
 
 		# Blender считает до конца, не прерываем; правки тем временем копятся в state
 		try:
-			(glb, stats), error = await render(snap), None
+			(glb, stats, values), error = await render(snap), None
 		except Exception as e:
-			glb, stats, error = None, None, f"{type(e).__name__}: {e}"
+			glb = stats = values = None
+			error = f"{type(e).__name__}: {e}"
 
 		async with changed:
 			done_version = snap["version"]
@@ -128,7 +133,8 @@ async def generation_loop():
 				print(f"v{snap['version']} устарела (уже v{state['version']}), не отправляем", flush=True)
 				continue
 			if error is None:
-				ready = {**snap, "stats": stats, "glb": glb}
+				# Значения — те, что реально стоят в сцене Blender (поверх запрошенных)
+				ready = {**snap, **values, "stats": stats, "glb": glb}
 				print(f"v{snap['version']} готова, рассылаем", flush=True)
 			else:
 				last_error = {"version": snap["version"], "error": error}
@@ -217,9 +223,9 @@ async def send_loop(ws: WebSocket, conn: dict):
 				await ws.send_json({
 					"type": "model",
 					"version": model["version"],
-					"x": model["x"], "y": model["y"], "z": model["z"],
+					**{k: model[k] for k in PARAM_KEYS if k in model},
 					"stats": model["stats"],
-				"glb_bytes": len(model["glb"]),
+					"glb_bytes": len(model["glb"]),
 				})
 				if conn["glb"]:
 					await ws.send_bytes(model["glb"])
@@ -247,7 +253,10 @@ async def ws_endpoint(ws: WebSocket):
 				if kind == "view":
 					patch = parse_view(msg)
 				elif kind == "params":
-					x, y, z = float(msg["x"]), float(msg["y"]), float(msg["z"])
+					# Частичная правка: неуказанные параметры остаются прежними
+					patch = {k: float(msg[k]) for k in PARAM_KEYS if k in msg}
+					if not patch:
+						raise ValueError("нет параметров")
 					seq = int(msg.get("seq", 0))
 				else:
 					continue
@@ -261,7 +270,7 @@ async def ws_endpoint(ws: WebSocket):
 				continue
 			async with changed:
 				state["version"] += 1
-				state.update(x=x, y=y, z=z)
+				state.update(patch)
 				conn["ack"], conn["seq"] = state["version"], seq
 				changed.notify_all()
 	except WebSocketDisconnect:

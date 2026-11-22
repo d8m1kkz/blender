@@ -477,7 +477,7 @@ onMounted(() => {
 	scene = new THREE.Scene()
 
 	camera = new THREE.PerspectiveCamera(15, width / height, 0.1, 10000)
-	camera.position.set(250, 250, 500)
+	camera.position.set(460, 460, 1125) // то же направление, расстояние ≈ 1300 мм (как distance по умолчанию)
 	camera.lookAt(0, 0, 0)
 
 	renderer = new THREE.WebGLRenderer({ antialias: true })

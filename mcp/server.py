@@ -31,8 +31,9 @@ mcp = MCPServer(
 	instructions=(
 		"Управление общей 3D-корзиной, которую видят все открытые веб-интерфейсы. "
 		"Размеры в миллиметрах: width и length — ширина и длина (20–256, стол принтера Bambu Lab A1), "
-		"height — высота (20–150). Модель пересчитывается в Blender; новые размеры и модель "
-		"появляются у всех клиентов одновременно, когда расчёт закончен. "
+		"height — высота (20–150). Корзина решётчатая; её форма: толщина прутков (thickness), высота арки "
+		"в стенках (excavation_height) и шаг перфорации-решётки стенок и дна (perforation). Модель пересчитывается в Blender; "
+		"новые значения и модель появляются у всех клиентов одновременно, когда расчёт закончен. "
 		"Кроме размеров есть общий «вид»: цвет модели, расстояние от камеры, ориентация модели "
 		"(повороты в градусах: rot_x — вокруг оси ширины, rot_y — вокруг вертикали, rot_z — вокруг оси длины; "
 		"модель всегда стоит на столе нижней точкой, так что rot_x=90 кладёт её на бок, rot_x=180 переворачивает) "
@@ -43,11 +44,25 @@ mcp = MCPServer(
 )
 
 
+# Описания и диапазоны параметров формы: общие для схем входа (set_*) и выхода (get_*, Basket)
+# Корзина решётчатая: стенки и дно — из прутков с просветами между ними (в сцене — «толщина прутков»,
+# «высота арки», stepWall, stepBottom)
+THICKNESS = "толщина прутков решётки (стенок и дна), мм"
+EXCAVATION_HEIGHT = "высота арки — арочного выреза в стенках корзины, мм"
+PERFORATION_WALL = "шаг перфорации стенок — расстояние между прутками решётки, мм; больше — просветы крупнее и прутков меньше"
+PERFORATION_FLOOR = "шаг перфорации дна — расстояние между прутками решётки, мм; больше — просветы крупнее и прутков меньше"
+
+
 class Basket(BaseModel):
 	version: int = Field(description="номер версии общей корзины")
 	width: float
 	length: float
 	height: float
+	# Значения — из сцены Blender; None, если gen ещё старый и их не присылает
+	thickness: float | None = Field(None, description=THICKNESS)
+	excavation_height: float | None = Field(None, description=EXCAVATION_HEIGHT)
+	perforation_wall: float | None = Field(None, description=PERFORATION_WALL)
+	perforation_floor: float | None = Field(None, description=PERFORATION_FLOOR)
 
 
 class SetResult(BaseModel):
@@ -58,9 +73,15 @@ class SetResult(BaseModel):
 	basket: Basket = Field(description="корзина, которую сейчас видят все клиенты")
 
 
+SHAPE_KEYS = ("thickness", "excavation_height", "perforation_wall", "perforation_floor")
+
+
 def to_basket(msg: dict) -> Basket:
-	# Протокол gen называет размеры x/y/z: x — width, y — length, z — height
-	return Basket(version=msg["version"], width=msg["x"], length=msg["y"], height=msg["z"])
+	# Протокол gen называет размеры x/y/z: x — width, y — length, z — height; остальные имена совпадают
+	return Basket(
+		version=msg["version"], width=msg["x"], length=msg["y"], height=msg["z"],
+		**{k: msg[k] for k in SHAPE_KEYS if k in msg},
+	)
 
 
 async def recv_until(ws, predicate) -> dict:
@@ -100,7 +121,7 @@ async def current(ws) -> dict:
 
 @mcp.tool()
 async def get_basket() -> Basket:
-	"""Текущие размеры общей корзины (мм), которую сейчас видят все веб-клиенты."""
+	"""Текущие размеры (мм) и форма общей корзины, которую сейчас видят все веб-клиенты."""
 	async with connect() as ws:
 		return to_basket(await current(ws))
 
@@ -116,17 +137,19 @@ async def set_basket(
 	Неуказанные размеры остаются прежними. Если за время расчёта корзину изменил
 	кто-то другой, вернётся status="superseded" и та корзина, которую видят все.
 	"""
-	if width is None and length is None and height is None:
+	patch = {k: v for k, v in (("x", width), ("y", length), ("z", height)) if v is not None}
+	if not patch:
 		raise ToolError("укажите хотя бы один из размеров: width, length или height")
+	return await set_params(**patch)
 
+
+async def set_params(**patch) -> SetResult:
+	"""Шлёт частичную правку параметров модели (имена протокола gen) и ждёт пересчитанную модель.
+
+	Неуказанные параметры gen оставляет прежними, поэтому текущую корзину заранее не читаем.
+	"""
 	async with connect() as ws:
-		cur = await current(ws)
-		params = {
-			"x": cur["x"] if width is None else width,
-			"y": cur["y"] if length is None else length,
-			"z": cur["z"] if height is None else height,
-		}
-		await ws.send(json.dumps({"type": "params", **params, "seq": 1}))
+		await ws.send(json.dumps({"type": "params", **patch, "seq": 1}))
 
 		version = None
 		try:
@@ -150,6 +173,90 @@ async def set_basket(
 				f"правка принята как v{version}, но актуальная модель не появилась за {RESULT_TIMEOUT} с — "
 				"возможно, корзину непрерывно меняют из веб-интерфейса"
 			) from None
+
+
+# ── Форма корзины: толщина, выемка, перфорация (пересчёт в Blender, как и размеры) ──
+
+class Thickness(BaseModel):
+	version: int = Field(description="номер версии общей корзины")
+	thickness: float = Field(description=THICKNESS)
+
+
+class ExcavationHeight(BaseModel):
+	version: int = Field(description="номер версии общей корзины")
+	excavation_height: float = Field(description=EXCAVATION_HEIGHT)
+
+
+class Perforation(BaseModel):
+	version: int = Field(description="номер версии общей корзины")
+	wall: float = Field(description=PERFORATION_WALL)
+	floor: float = Field(description=PERFORATION_FLOOR)
+
+
+async def current_shape(*keys: str) -> dict:
+	"""Текущая модель; ToolError, если gen не прислал нужных значений из Blender."""
+	async with connect() as ws:
+		msg = await current(ws)
+	missing = [k for k in keys if msg.get(k) is None]
+	if missing:
+		raise ToolError(f"gen не прислал {', '.join(missing)} — обновлены ли gen/web.py, gen/worker.py и basket.blend?")
+	return msg
+
+
+@mcp.tool()
+async def get_thickness() -> Thickness:
+	"""Текущая толщина прутков решётки корзины (мм), как она стоит в сцене Blender."""
+	msg = await current_shape("thickness")
+	return Thickness(version=msg["version"], thickness=msg["thickness"])
+
+
+@mcp.tool()
+async def set_thickness(
+	thickness: Annotated[float, Field(ge=0.4, le=10, description=f"{THICKNESS}; по умолчанию 1,5; меньше 0,8 (два прохода сопла 0,4) печатается ненадёжно")],
+) -> SetResult:
+	"""Меняет толщину прутков решётки и ждёт, пока все веб-клиенты получат пересчитанную модель.
+
+	Толще прутки — прочнее и тяжелее корзина (см. get_print_estimate); внешние размеры не меняются.
+	"""
+	return await set_params(thickness=thickness)
+
+
+@mcp.tool()
+async def get_excavation_height() -> ExcavationHeight:
+	"""Текущая высота арки в стенках корзины (мм), как она стоит в сцене Blender."""
+	msg = await current_shape("excavation_height")
+	return ExcavationHeight(version=msg["version"], excavation_height=msg["excavation_height"])
+
+
+@mcp.tool()
+async def set_excavation_height(
+	height: Annotated[float, Field(ge=0, le=150, description=f"{EXCAVATION_HEIGHT}; по умолчанию 10; не больше высоты корзины")],
+) -> SetResult:
+	"""Меняет высоту арки в стенках и ждёт, пока все веб-клиенты получат пересчитанную модель."""
+	return await set_params(excavation_height=height)
+
+
+@mcp.tool()
+async def get_perforation() -> Perforation:
+	"""Текущий шаг перфорации (решётки) стенок и дна корзины (мм), как он стоит в сцене Blender."""
+	msg = await current_shape("perforation_wall", "perforation_floor")
+	return Perforation(version=msg["version"], wall=msg["perforation_wall"], floor=msg["perforation_floor"])
+
+
+@mcp.tool()
+async def set_perforation(
+	wall: Annotated[float | None, Field(ge=2, le=100, description=f"{PERFORATION_WALL}; по умолчанию 15; не указано — оставить")] = None,
+	floor: Annotated[float | None, Field(ge=2, le=100, description=f"{PERFORATION_FLOOR}; по умолчанию 10; не указано — оставить")] = None,
+) -> SetResult:
+	"""Меняет шаг перфорации (решётки) стенок и/или дна; ждёт пересчитанную модель у всех клиентов.
+
+	Неуказанное остаётся прежним. Крупный шаг облегчает корзину, но делает её менее жёсткой,
+	а мелкие вещи в ней провалятся; мелкий шаг — плотнее и тяжелее.
+	"""
+	patch = {k: v for k, v in (("perforation_wall", wall), ("perforation_floor", floor)) if v is not None}
+	if not patch:
+		raise ToolError("укажите хотя бы одно: wall или floor")
+	return await set_params(**patch)
 
 
 # ── Общий вид: цвет, камера, ориентация, свет (мгновенно, без Blender) ──
@@ -302,7 +409,7 @@ async def set_spin(spin: Annotated[float, Field(ge=-360, le=360, description="г
 # ── Сводка, сброс, оценка печати, снимок ──
 
 class State(BaseModel):
-	basket: Basket = Field(description="размеры корзины, мм")
+	basket: Basket = Field(description="размеры (мм) и форма корзины")
 	color: str = Field(description="цвет модели, #RRGGBB")
 	distance: float = Field(description="расстояние камеры, мм")
 	orientation: Orientation
@@ -323,7 +430,7 @@ class PrintEstimate(BaseModel):
 
 @mcp.tool()
 async def get_state() -> State:
-	"""Всё о корзине одним вызовом: размеры и весь вид (цвет, камера, ориентация, свет, вращение)."""
+	"""Всё о корзине одним вызовом: размеры, форма (толщина, выемка, перфорация) и весь вид."""
 	async with connect() as ws:
 		got = {}
 		try:
