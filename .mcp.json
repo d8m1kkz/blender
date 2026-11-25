@@ -1,8 +1,0 @@
-{
-	"mcpServers": {
-		"basket": {
-			"type": "http",
-			"url": "http://localhost/mcp"
-		}
-	}
-}

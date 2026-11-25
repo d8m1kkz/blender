@@ -1,8 +1,9 @@
 import os, re, json, uuid, asyncio, subprocess
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 
 SOCK = os.environ.get("BLENDER_SOCK", "/dev/shm/blender.sock")
 
@@ -12,9 +13,7 @@ worker = None
 # state — желаемые параметры: последняя правка любого клиента; version растёт с каждой правкой.
 # Стартуем с version=1 и дефолтами клиента, чтобы модель была готова к первому подключению.
 state = {"version": 1, "x": 100.0, "y": 100.0, "z": 50.0}
-# Параметры модели, которые клиенты могут менять (имена — как в PARAMS у gen/worker.py).
 # Правка может прийти частичной; что ещё никто не задавал, в state нет — Blender берёт своё из basket.blend.
-PARAM_KEYS = ("x", "y", "z", "thickness", "excavation_height", "perforation_wall", "perforation_floor")
 # view — общий «вид»: цвет, камера, ориентация модели, свет. Blender не нужен, поэтому правка
 # рассылается сразу; свой version, независимый от version корзины. Дефолты совпадают с клиентом.
 VIEW_DEFAULTS = {
@@ -33,17 +32,35 @@ VIEW_RANGES = {
 	"spin": (-360, 360),
 }
 VIEW_COLORS = ("color", "light_color")
-ready = None       # последняя опубликованная (актуальная) модель: {version, <PARAM_KEYS из Blender>, stats, glb}
+# Сколько секунд ждём, пока клиент примет одно сообщение; дольше — отключаем (зависший клиент не должен держать сервер)
+SEND_TIMEOUT = float(os.environ.get("SEND_TIMEOUT", "20"))
+# Параметры модели {имя: {"min", "max"}}: задаются только в PARAMS у worker.py, сюда приходят после каждого
+# запуска воркера (load_limits). Ключи — это и есть список параметров, своего списка у web.py нет.
+# Правки вне диапазона отбрасываются; клиенты берут пределы через GET /limits.
+limits: dict = {}
+ready = None       # последняя опубликованная (актуальная) модель: {version, <параметры из Blender>, glb}
 last_error = None  # последняя ошибка актуальной версии: {version, error}
 done_version = 0   # последняя обработанная циклом версия (опубликованная, выброшенная или с ошибкой)
 # Будит цикл генерации и отправителей всех соединений при любом изменении
 changed = asyncio.Condition()
 
 
+def pick_params(source: dict) -> dict:
+	"""Только параметры модели из source (без version, glb и прочего); отсутствующие пропускаются."""
+	return {k: source[k] for k in limits if k in source}
+
+
+def check_range(key: str, value, lo: float, hi: float) -> float:
+	"""Приводит value к числу и проверяет пределы; ValueError — если не число или вне диапазона."""
+	value = float(value)
+	if not lo <= value <= hi:  # заодно отсекает NaN
+		raise ValueError(f"{key}: вне диапазона {lo}…{hi}")
+	return value
+
+
 async def start_worker():
 	global worker
-	if os.path.exists(SOCK):
-		os.remove(SOCK)
+	remove_file(SOCK)
 	worker = subprocess.Popen([
 		"blender",
 		"-b", "basket.blend",
@@ -54,6 +71,7 @@ async def start_worker():
 	# Воркер создаёт сокет после прогрева
 	for _ in range(1200):
 		if os.path.exists(SOCK):
+			await load_limits()
 			return
 		if worker.poll() is not None:
 			raise RuntimeError("blender worker exited during startup")
@@ -88,11 +106,25 @@ async def call_worker(payload: dict) -> dict:
 		writer.close()
 
 
-async def render(snap: dict) -> tuple[bytes, dict, dict]:
-	"""Генерирует модель по снимку параметров: GLB байтами, статистика сетки и значения параметров из Blender."""
+async def load_limits():
+	"""Спрашивает у воркера пределы параметров (сокет появляется чуть раньше listen — пробуем несколько раз)."""
+	global limits
+	for _ in range(50):
+		try:
+			resp = await call_worker({"op": "limits"})
+			break
+		except (ConnectionError, OSError):
+			await asyncio.sleep(0.1)
+	else:
+		raise RuntimeError("worker did not answer the limits request")
+	limits = resp["limits"]
+
+
+async def render(snap: dict) -> tuple[bytes, dict]:
+	"""Генерирует модель по снимку параметров: GLB байтами и значения параметров из Blender."""
 	out = f"/dev/shm/m_{uuid.uuid4().hex}.glb"
 	# Шлём все заданные параметры, а не только изменённые: перезапущенный воркер начинает со сцены из файла
-	payload = {k: v for k, v in snap.items() if k in PARAM_KEYS} | {"out": out}
+	payload = pick_params(snap) | {"out": out}
 	try:
 		try:
 			if worker is None or worker.poll() is not None:
@@ -106,7 +138,7 @@ async def render(snap: dict) -> tuple[bytes, dict, dict]:
 		if not resp.get("ok"):
 			raise RuntimeError(resp.get("error", "unknown error"))
 		with open(out, "rb") as f:
-			return f.read(), resp.get("stats", {}), resp.get("params", {})
+			return f.read(), resp.get("params", {})
 	finally:
 		remove_file(out)
 
@@ -119,11 +151,16 @@ async def generation_loop():
 			await changed.wait_for(lambda: state["version"] > done_version)
 			snap = dict(state)
 
+		# Запоминаем параметры, с которыми работает Blender: к ним привяжется наименьший запас памяти.
+		# Базой служат значения последней готовой модели (в ней есть и то, что клиенты не задавали).
+		blender_params.clear()
+		blender_params.update(pick_params({**(ready or {}), **snap}))
+
 		# Blender считает до конца, не прерываем; правки тем временем копятся в state
 		try:
-			(glb, stats, values), error = await render(snap), None
+			(glb, values), error = await render(snap), None
 		except Exception as e:
-			glb = stats = values = None
+			glb = values = None
 			error = f"{type(e).__name__}: {e}"
 
 		async with changed:
@@ -134,7 +171,7 @@ async def generation_loop():
 				continue
 			if error is None:
 				# Значения — те, что реально стоят в сцене Blender (поверх запрошенных)
-				ready = {**snap, **values, "stats": stats, "glb": glb}
+				ready = {**snap, **values, "glb": glb}
 				print(f"v{snap['version']} готова, рассылаем", flush=True)
 			else:
 				last_error = {"version": snap["version"], "error": error}
@@ -142,12 +179,48 @@ async def generation_loop():
 			changed.notify_all()
 
 
+# ── Замер запаса памяти (cgroup v2, как на Render) ──
+# Фоновая задача ищет наименьший запас памяти и запоминает строкой: запас, время и параметры корзины.
+# memory.peak — наибольшая занятость контейнера с запуска; ядро ведёт его само, поэтому короткие всплески не теряются.
+blender_params: dict = {}  # параметры корзины, с которыми сейчас работает (или только что работал) Blender
+# Начальный запас заведомо больше любого настоящего: первый же замер станет «минимумом»
+mem_min = {"free": 99999999, "line": "нет данных"}
+
+
+def read_mb(name):
+	v = open(f"/sys/fs/cgroup/{name}").read().strip()
+	return 0 if v == "max" else int(v) / 1048576  # «max» = без лимита → 0 (ниже подставляем 512)
+
+
+MEM_LIMIT = read_mb("memory.max") or 512  # лимит не меняется, читаем один раз (без лимита, как локально, — 512 как на Render)
+
+
+def sample_memory():
+	free = MEM_LIMIT - read_mb("memory.peak")
+	if free < mem_min["free"]:
+		params = " ".join(f"{k}={v:g}" for k, v in blender_params.items()) or "старт, до первой генерации"
+		mem_min["free"] = free
+		mem_min["line"] = f"RAM мин. запас {free:.1f} МБ: {params}"
+		print(mem_min["line"], flush=True)  # в лог Render: память процесса не переживёт перезапуск
+
+
+async def memory_sampler(interval: float):
+	while True:
+		sample_memory()
+		await asyncio.sleep(interval)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
 	await start_worker()
 	loop_task = asyncio.create_task(generation_loop())
+	# Фоновый замер запаса памяти; MEM_SAMPLE_INTERVAL — период в секундах (0 — не замерять)
+	interval = float(os.environ.get("MEM_SAMPLE_INTERVAL", "0.5"))
+	mem_task = asyncio.create_task(memory_sampler(interval)) if interval > 0 else None
 	yield
 	loop_task.cancel()
+	if mem_task:
+		mem_task.cancel()
 	stop_worker()
 
 
@@ -177,12 +250,17 @@ def parse_view(msg: dict) -> dict:
 			patch[key] = value.lower()
 	for key, (lo, hi) in VIEW_RANGES.items():
 		if key in msg:
-			value = float(msg[key])
-			if not lo <= value <= hi:  # заодно отсекает NaN
-				raise ValueError(f"{key}: вне диапазона {lo}…{hi}")
-			patch[key] = value
+			patch[key] = check_range(key, msg[key], lo, hi)
 	if not patch:
 		raise ValueError("нет полей вида")
+	return patch
+
+
+def parse_params(msg: dict) -> dict:
+	"""Частичная правка параметров модели: ValueError — если параметров нет или значение вне пределов."""
+	patch = {k: check_range(k, v, limits[k]["min"], limits[k]["max"]) for k, v in pick_params(msg).items()}
+	if not patch:
+		raise ValueError("нет параметров")
 	return patch
 
 
@@ -193,6 +271,9 @@ async def send_loop(ws: WebSocket, conn: dict):
 	sent_view = 0
 	# Старые ошибки новому клиенту не показываем — только те, что случатся при нём
 	sent_error = last_error["version"] if last_error else 0
+
+	async def send(coro):
+		await asyncio.wait_for(coro, SEND_TIMEOUT)
 
 	def has_news():
 		return (
@@ -212,27 +293,32 @@ async def send_loop(ws: WebSocket, conn: dict):
 				view_snap = dict(view)
 
 			if view_snap["version"] > sent_view:
-				await ws.send_json({"type": "view", **view_snap})
+				await send(ws.send_json({"type": "view", **view_snap}))
 				sent_view = view_snap["version"]
 
 			# Несколько быстрых правок могут получить один ack: seq — номер последней из них у клиента
 			if ack > sent_ack:
-				await ws.send_json({"type": "ack", "version": ack, "seq": seq})
+				await send(ws.send_json({"type": "ack", "version": ack, "seq": seq}))
 				sent_ack = ack
 			if model is not None and model["version"] > sent_model:
-				await ws.send_json({
+				await send(ws.send_json({
 					"type": "model",
 					"version": model["version"],
-					**{k: model[k] for k in PARAM_KEYS if k in model},
-					"stats": model["stats"],
+					**pick_params(model),
 					"glb_bytes": len(model["glb"]),
-				})
-				if conn["glb"]:
-					await ws.send_bytes(model["glb"])
+				}))
+				await send(ws.send_bytes(model["glb"]))
 				sent_model = model["version"]
 			if error is not None and error["version"] > sent_error:
-				await ws.send_json({"type": "error", **error})
+				await send(ws.send_json({"type": "error", **error}))
 				sent_error = error["version"]
+	except asyncio.TimeoutError:
+		# Клиент не читает данные: не держим его, иначе зависшая отправка копит память и тормозит сервер
+		print(f"клиент не принял данные за {SEND_TIMEOUT:g} с, отключаем", flush=True)
+		try:
+			await asyncio.wait_for(ws.close(), 5)
+		except Exception:
+			pass
 	except Exception:
 		# Соединение закрылось посреди отправки — приёмник в ws_endpoint это тоже увидит
 		pass
@@ -241,9 +327,8 @@ async def send_loop(ws: WebSocket, conn: dict):
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
 	await ws.accept()
-	# ack — последняя версия, присвоенная правке этого клиента; seq — номер этой правки у клиента;
-	# glb — слать ли бинарный кадр с моделью (/ws?glb=0 — только заголовки, например для MCP)
-	conn = {"ack": 0, "seq": 0, "glb": ws.query_params.get("glb") != "0"}
+	# ack — последняя версия, присвоенная правке этого клиента; seq — номер этой правки у клиента
+	conn = {"ack": 0, "seq": 0}
 	sender = asyncio.create_task(send_loop(ws, conn))
 	try:
 		while True:
@@ -254,24 +339,18 @@ async def ws_endpoint(ws: WebSocket):
 					patch = parse_view(msg)
 				elif kind == "params":
 					# Частичная правка: неуказанные параметры остаются прежними
-					patch = {k: float(msg[k]) for k in PARAM_KEYS if k in msg}
-					if not patch:
-						raise ValueError("нет параметров")
+					patch = parse_params(msg)
 					seq = int(msg.get("seq", 0))
 				else:
 					continue
 			except (ValueError, KeyError, TypeError, AttributeError):
 				continue  # битое сообщение пропускаем, соединение не рвём
-			if kind == "view":
-				async with changed:
-					view.update(patch)
-					view["version"] += 1
-					changed.notify_all()
-				continue
 			async with changed:
-				state["version"] += 1
-				state.update(patch)
-				conn["ack"], conn["seq"] = state["version"], seq
+				target = view if kind == "view" else state
+				target.update(patch)
+				target["version"] += 1
+				if kind == "params":
+					conn["ack"], conn["seq"] = state["version"], seq
 				changed.notify_all()
 	except WebSocketDisconnect:
 		pass
@@ -279,21 +358,15 @@ async def ws_endpoint(ws: WebSocket):
 		sender.cancel()
 
 
-@app.get("/model")
-async def model():
-	"""Текущая опубликованная модель: через nginx — /model.glb (ссылку выдаёт MCP), в dev ещё :8080/model.
+@app.get("/limits")
+async def get_limits():
+	"""Допустимые значения параметров модели {имя: {min, max}} — из реестра PARAMS у Blender-воркера."""
+	if not limits:
+		raise HTTPException(503, "пределы ещё не получены")
+	return limits
 
-	Отдаём ту, что актуальна в момент скачивания: размеры и версия — в имени файла.
-	"""
-	if ready is None:
-		raise HTTPException(503, "модель ещё не готова")
-	name = f"basket_v{ready['version']}_{ready['x']:g}x{ready['y']:g}x{ready['z']:g}.glb"
-	return Response(
-		content=ready["glb"],
-		media_type="model/gltf-binary",
-		headers={
-			"X-Version": str(ready["version"]),
-			"Content-Disposition": f'attachment; filename="{name}"',
-			"Cache-Control": "no-store",  # по тому же адресу после правки будет другая модель
-		},
-	)
+
+@app.get("/memory")
+async def memory():
+	"""Одна строка: наименьший запас памяти с запуска, время и параметры корзины в тот момент."""
+	return PlainTextResponse(mem_min["line"])

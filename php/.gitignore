@@ -1,0 +1,11 @@
+# Настройки с секретами
+.env
+.env.beget
+
+# Зависимости и то, что создаётся при сборке и разработке
+/node_modules
+/vendor
+/public_html/build
+/public_html/hot
+/public_html/fonts-manifest.dev.json
+*.log

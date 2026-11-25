@@ -1,0 +1,5 @@
+# Единая точка входа для compose.caddy.yml. Адрес сайта берётся из SITE_HOST: <IP через дефисы>.sslip.io
+# (Caddy сам получает сертификат Let's Encrypt). Всё уходит в nginx, PHP-запросы он сам передаёт в php.
+{$SITE_HOST:localhost} {
+	reverse_proxy nginx:80
+}

@@ -1,0 +1,40 @@
+# РАЗРАБОТКА: только отличия от compose.yml (production). Подхватывается автоматически: `docker compose up`.
+# Vite (HMR) запускается сервисом vite (порт 5173); `npm run dev` на хосте не нужен.
+
+services:
+  # Vite с HMR. Стандартный образ Node: свой образ не нужен, код берётся из тома.
+  # node_modules лежит в отдельном томе, чтобы не смешиваться с хостовыми (у пакетов есть нативные части под ОС).
+  vite:
+    image: node:22-alpine
+    working_dir: /app
+    command: sh -c "npm install && npm run dev"
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./php:/app
+      - vite_node_modules:/app/node_modules
+    restart: "no"
+  # Конфиг и статика монтируются томами; порт 80 уже опубликован в compose.yml
+  nginx:
+    volumes:
+      - ./php/public_html:/var/www/html/public_html:ro
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    restart: "no"
+
+  # Код Laravel монтируется томом (вместо тома app-storage storage берётся из ./php/storage)
+  php:
+    env_file: !reset [] # настройки Laravel в разработке — из php/.env (папка смонтирована), не из .env.beget
+    volumes: !override
+      - ./php:/var/www/html
+    restart: "no"
+
+  gen:
+    command: uvicorn web:app --host 0.0.0.0 --port 8080 --reload
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./gen:/app
+    restart: "no"
+
+volumes:
+  vite_node_modules:

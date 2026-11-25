@@ -1,0 +1,14 @@
+# Служебное и настройки разработки
+.git
+.env
+
+# Зависимости и сборка фронтенда (в образе делаются заново)
+node_modules
+vendor
+public_html/build
+public_html/hot
+public_html/fonts-manifest.dev.json
+
+# Рабочие файлы Laravel: содержимое папок в образ не берём
+storage/logs/*
+storage/framework/*/*
