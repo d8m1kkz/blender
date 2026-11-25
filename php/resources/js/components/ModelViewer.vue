@@ -127,7 +127,6 @@ const lastAck = ref(0) // version, присвоенная моей послед�
 const shownVersion = ref(0) // версия модели на экране
 const settledVersion = ref(0) // последняя версия, по которой пришёл итог: модель или ошибка
 
-const hasUnacked = () => sentSeq.value > ackedSeq.value
 
 // Спиннер: ещё нет первой модели или ждём итог по своей правке
 const isLoading = computed(
@@ -244,6 +243,9 @@ const disposeModel = (model) => {
 		if (o.isMesh) o.geometry.dispose()
 	})
 }
+
+
+const hasUnacked = () => sentSeq.value > ackedSeq.value
 
 // Можно ли поставить пришедшие значения в слайдеры и поля.
 // Модель показываем всегда (сервер прислал её как актуальную), а значения — не всегда:
