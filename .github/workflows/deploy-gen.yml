@@ -1,0 +1,82 @@
+# Автоматический деплой gen и caddy на VPS Beget. Вся цепочка:
+#   1. На рабочем компьютере: git push в main. Hook scripts/hooks/pre-push (включается один раз: scripts/setup.sh)
+#      при изменениях gen собирает образ и отправляет на Docker Hub (scripts/prepare.sh gen).
+#   2. Здесь, на временной машине GitHub: проверка, что образ собран из этой версии gen,
+#      и запуск scripts/deploy.vps.beget.sh (VPS скачивает образ и перезапускает контейнеры).
+# Секреты (на GitHub: Settings → Secrets and variables → Actions):
+#   VPS_SSH_KEY     — закрытый ключ для входа на VPS, без пароля
+#   VPS_KNOWN_HOSTS — ключ самого VPS: ssh-keygen -F 85.198.84.41 | grep -v '^#'
+name: Деплой gen на VPS Beget
+
+on:
+  push:
+    branches: [main]
+    paths: # запуск только если в push изменилось что-то из этого
+      - gen/**
+      - compose_gen.yml
+      - compose.vps.yml
+      - scripts/deploy.vps.beget.sh
+      - .github/workflows/deploy-gen.yml
+  workflow_dispatch: # и вручную: вкладка Actions → Run workflow
+
+permissions:
+  contents: read
+
+# два деплоя не идут одновременно: следующий ждёт окончания текущего
+concurrency:
+  group: deploy-gen
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main' # ручной запуск из другой ветки пропускается
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Скачать репозиторий
+        uses: actions/checkout@v5
+
+      # Читается только описание образа, сам образ не скачивается
+      - name: Образ на Docker Hub собран из этой версии gen?
+        shell: bash
+        run: |
+          want=$(git rev-parse HEAD:gen)
+          got=$(docker buildx imagetools inspect d8m1kkz/blender-gen:latest --format '{{json .Image}}' |
+            jq -r '[.. | objects | ."gen.tree"? // empty][0]')
+          echo "нужна версия: $want"
+          echo "в образе:     $got"
+          if [ "$got" != "$want" ]; then
+            echo "::error::Образ на Docker Hub собран не из этой версии gen. На своём компьютере выполните scripts/setup.sh и scripts/prepare.sh gen, затем повторите запуск"
+            exit 1
+          fi
+
+      # Тот же алиас begetvps, что в ~/.ssh/config на рабочем компьютере: скрипт деплоя работает без изменений
+      - name: Настроить SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          (umask 077; printf '%s\n' "$VPS_SSH_KEY" | tr -d '\r' > ~/.ssh/beget_root)
+          printf '%s\n' "$VPS_KNOWN_HOSTS" | tr -d '\r' > ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<'EOF'
+          Host begetvps
+              HostName 85.198.84.41
+              User root
+              IdentityFile ~/.ssh/beget_root
+              IdentitiesOnly yes
+          EOF
+
+      - name: Развернуть
+        run: scripts/deploy.vps.beget.sh
+
+      - name: На сервере работает новый образ?
+        shell: bash
+        run: |
+          want=$(git rev-parse HEAD:gen)
+          got=$(curl -fsS -m 10 https://85-198-84-41.sslip.io/version | jq -r .gen_tree)
+          echo "нужна версия: $want"
+          echo "на сервере:   $got"
+          if [ "$got" != "$want" ]; then
+            echo "::error::На сервере работает не та версия gen"
+            exit 1
+          fi

@@ -39,6 +39,11 @@ WORKDIR /app
 
 COPY web.py worker.py basket.blend ./
 
+# Из какой версии папки gen собран образ (задаёт scripts/prepare.sh), отдаётся по GET /version.
+# В конце файла, чтобы новое значение не пересобирало слои выше
+ARG GEN_TREE=
+ENV GEN_TREE=$GEN_TREE
+
 # Порт берём из $PORT (его задаёт Render, по умолчанию 10000); локально и в compose — 8080.
 # Shell-форма + exec: нужна подстановка переменной, а uvicorn должен остаться PID 1 и получать SIGTERM.
 CMD exec uvicorn web:app --host 0.0.0.0 --port ${PORT:-8080}

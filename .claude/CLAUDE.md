@@ -22,7 +22,8 @@ LLM-агент ──► MCP-сервер (Laravel) ──HTTP─┘
 - `php/` — Laravel + Vite + Vue, сервис `php` (php-fpm с кодом). Laravel почти ничего не делает: отдаёт страницу с компонентом `ModelViewer.vue` и список адресов `gen` (`/gens`). Ещё здесь MCP-сервер `<сайт>/mcp` (пакет `laravel/mcp`: `routes/ai.php`, `app/Mcp/`): по инструменту `get_*`/`set_*` на каждый параметр, ходит в `gen` по HTTP: параметры модели — `GET /limits`, `GET /params`, `POST /params`; параметры общего вида (вращение, камера, цвет) — `GET /view/limits`, `GET /view`, `POST /view`.
 - `gen/` — сервис генерации: `web.py` (FastAPI), `worker.py` (долгоживущий Blender), `basket.blend` (сцена).
 - `caddy/` — `Caddyfile` только для запасного варианта с HTTPS перед сайтом (`compose.caddy.yml`).
-- `scripts/` — все скрипты `.sh`: сборка образов (`prepare.sh`), деплой сайта (`deploy.beget.sh`) и `gen` (`deploy.vps.beget.sh`, `deploy.vps.immers.sh`), проверки (`check.begetvps.sh` — что установлено и запущено на VPS Beget, `check.poll_mem.sh` — опрос `GET /memory` развёрнутого `gen`, наименьший запас памяти).
+- `scripts/` — все скрипты `.sh`: сборка образов (`prepare.sh`), деплой сайта (`deploy.beget.sh`) и `gen` (`deploy.vps.beget.sh`, `deploy.vps.immers.sh`), проверки (`check.begetvps.sh` — что установлено и запущено на VPS Beget, `check.poll_mem.sh` — опрос `GET /memory` развёрнутого `gen`, наименьший запас памяти), настройка нового компьютера (`setup.sh`). В `scripts/hooks/` — hooks git (`pre-push`).
+- `.github/workflows/` — GitHub Actions: `deploy-gen.yml` (деплой `gen` и caddy на VPS Beget).
 - Браузер подключается к выбранному `gen` напрямую (WebSocket); сайт лишь даёт список адресов `GEN_ORIGINS`.
 
 ## Принципы
@@ -31,6 +32,7 @@ LLM-агент ──► MCP-сервер (Laravel) ──HTTP─┘
 - **Один образ везде** (`d8m1kkz/blender-nginx`, `d8m1kkz/blender-php`, `d8m1kkz/blender-gen`, тег `latest`): dev и prod различаются только compose-файлом и переменными окружения. Не заводи отдельные теги и `target` для dev.
 - **Адреса `gen` — одна переменная `GEN_ORIGINS`** (через запятую, первый по умолчанию), задаётся только для `php`: в dev — `php/.env`, в prod (Beget и VPS) — `php/.env.beget`. Браузер ходит к ним напрямую, поэтому адрес должен быть доступен из браузера. Если страница открывается по https (Beget, вариант с caddy), `gen` тоже нужен под HTTPS.
 - **Два варианта деплоя `gen` на VPS:** Beget (`scripts/deploy.vps.beget.sh`) и immers.cloud (`scripts/deploy.vps.immers.sh`). Оба разворачивают `compose.vps.yml` (`gen` и caddy). Сайт (`php`) ставится отдельно на виртуальный хостинг Beget (`scripts/deploy.beget.sh`).
+- **Автодеплой `gen` по `git push` в `main`** (только VPS Beget; сайт и immers — вручную): hook `scripts/hooks/pre-push` на рабочем компьютере при изменениях `gen/`, `compose.yml`, `compose_gen.yml` собирает образ и отправляет на Docker Hub, затем `.github/workflows/deploy-gen.yml` запускает `scripts/deploy.vps.beget.sh`. Образ на GitHub не собирается: в production идёт собранный локально. `prepare.sh` пишет в образ метку `gen.tree` (`git rev-parse HEAD:gen`), сценарий сверяет её с репозиторием и при несовпадении не деплоит. То же значение внутри образа отдаёт `GET /version` (`{"gen_tree": …}`): после деплоя сценарий проверяет, что на сервере работает новая версия. Секреты GitHub: `VPS_SSH_KEY`, `VPS_KNOWN_HOSTS`; адрес VPS записан и в скрипте, и в сценарии.
 - **Адрес `gen` для сервера (MCP) — `GEN_URL`** (в Docker `http://gen:8080`, задан в `compose.yml`); не задан — берётся первый из `GEN_ORIGINS` (так на Beget).
 - **Общая корзина:** состояние хранится в памяти одного процесса `gen`; клиенты одного `gen` видят одну корзину, клиенты разных `gen` независимы. Работает только с одним процессом uvicorn.
 - **Blender держится запущенным**, с ним говорит единственный цикл генерации (`bpy` не потокобезопасен). Устаревшие результаты отбрасываются, клиентам приходит только актуальная модель.
@@ -46,6 +48,7 @@ docker compose up --build            # dev: nginx (:80), php, gen (:8080), vite 
 docker compose -f compose.yml up -d  # prod (http)
 docker compose -f compose.yml -f compose.caddy.yml up -d  # prod с HTTPS через caddy (запасной вариант)
 SITE_HOST=<домен> docker compose -f compose.vps.yml up -d  # только gen под HTTPS (на самом VPS, <IP>.sslip.io)
+scripts/setup.sh                              # один раз после git clone: включить hook pre-push, проверить файлы не из git
 scripts/prepare.sh [сервис…]                  # собрать образы и отправить на Docker Hub
 scripts/deploy.beget.sh                       # деплой сайта (без gen) на хостинг Beget (ssh-алиас beget)
 scripts/deploy.vps.beget.sh [домен]           # деплой gen и caddy на VPS Beget (ssh-алиас begetvps, root, Docker уже стоит)

@@ -459,6 +459,13 @@ async def post_view(patch: dict):
 		return dict(view)
 
 
+@app.get("/version")
+async def get_version():
+	"""Из какой версии папки gen собран образ (git rev-parse HEAD:gen).
+	Пусто, если образ собран не через scripts/prepare.sh или с незакоммиченными изменениями."""
+	return {"gen_tree": os.environ.get("GEN_TREE", "")}
+
+
 @app.get("/memory")
 async def memory():
 	"""Одна строка: наименьший запас памяти с запуска и параметры корзины в тот момент."""
