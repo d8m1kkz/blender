@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Раз в 5 секунд спрашивает у развёрнутого gen наименьший запас памяти (GET /memory)
 # и печатает строку только когда она изменилась, то есть когда пик вырос.
-# Использование: scripts/poll_mem.sh [адрес gen] [период в секундах]
-# Пример:        scripts/poll_mem.sh https://blender-gen-render.onrender.com 5
+# Использование: scripts/chech.poll_mem.sh [адрес gen] [период в секундах]
+# Пример:        scripts/chech.poll_mem.sh https://blender-gen-render.onrender.com 5
 # Остановка: Ctrl+C.
 set -u
 

@@ -1,0 +1,38 @@
+# Сервер gen на VPS под HTTPS: https://<IP через дефисы>.sslip.io (например, https://1-2-3-4.sslip.io).
+# На VPS нужны два файла: этот и compose_gen.yml (описание gen). Caddyfile не нужен. Сайт (php) живёт отдельно.
+# Деплой с рабочей машины — копирует файлы, пишет SITE_HOST в .env и запускает:
+#   VPS Beget: scripts/deploy.vps.beget.sh [домен];  VPS immers: scripts/deploy.vps.immers.sh [IP] [домен]
+# Запуск прямо на VPS (SITE_HOST можно один раз записать в файл .env рядом с этим файлом):
+#   SITE_HOST=1-2-3-4.sslip.io docker compose -f compose.vps.yml up -d
+# Образ gen берётся с Docker Hub (отправить туда: scripts/prepare.sh gen).
+
+include:
+  - compose_gen.yml
+
+# Лимит логов Docker (иначе json-file растёт бесконечно): до 3 файлов по 10 МБ на контейнер
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # HTTPS: сам получает и продлевает сертификат Let's Encrypt для SITE_HOST и передаёт всё (и WebSocket) в gen.
+  # Порт 80 нужен для проверки домена и перехода с http на https.
+  caddy:
+    image: caddy:2
+    command: caddy reverse-proxy --from ${SITE_HOST:?задайте SITE_HOST, например 1-2-3-4.sslip.io} --to gen:8080
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy-data:/data # сертификаты: без тома выпускались бы заново при каждом пересоздании (лимиты Let's Encrypt)
+      - caddy-config:/config
+    logging: *default-logging
+    restart: unless-stopped
+    depends_on:
+      - gen
+
+volumes:
+  caddy-data:
+  caddy-config:

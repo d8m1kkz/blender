@@ -5,6 +5,22 @@ from collections import namedtuple
 SOCK_PATH = os.environ.get("BLENDER_SOCK", "/dev/shm/blender.sock")
 # Искусственная добавка к времени расчёта модели, секунды (0 — без задержки)
 EXTRA_DELAY = 0
+# Переключатель сжатия GLB (Draco):
+#   True  — компактный: позиции 11 бит (для 256 мм отклонение около 0,1 мм), без нормалей
+#           (клиент затеняет грани плоско), уровень 10. Трафик примерно в 4 раза меньше;
+#   False — точный, для сравнения: позиции 14 бит, нормали 10 бит, уровень 6.
+COMPACT_GLB = True
+DRACO_OPTIONS = {
+	"export_draco_position_quantization": 11,
+	"export_draco_mesh_compression_level": 10,
+	"export_normals": False,
+	"export_draco_normal_quantization": 8,
+} if COMPACT_GLB else {
+	"export_draco_position_quantization": 14,
+	"export_draco_mesh_compression_level": 6,
+	"export_normals": True,
+	"export_draco_normal_quantization": 10,
+}
 
 obj = bpy.data.objects['Basket']
 dimensions = bpy.data.node_groups["_dimensions"]
@@ -66,10 +82,13 @@ def generate(params, out):
 		export_obj.select_set(True)
 		bpy.context.view_layer.objects.active = export_obj
 
+		# Draco: геометрия сжимается в разы; точность и состав данных — в DRACO_OPTIONS
 		bpy.ops.export_scene.gltf(
 			filepath=out,
 			export_format='GLB',
-			use_selection=True
+			use_selection=True,
+			export_draco_mesh_compression_enable=True,
+			**DRACO_OPTIONS,
 		)
 		return values
 	finally:
@@ -114,7 +133,7 @@ def handle(conn):
 
 
 # Прогрев: первый экспорт импортирует glTF-аддон. Делаем это до публикации сокета
-generate({"x": 100.0, "y": 100.0, "z": 100.0}, "/dev/shm/m_warmup.glb")
+generate({"x": 20.0, "y": 20.0, "z": 20.0}, "/dev/shm/m_warmup.glb")
 os.remove("/dev/shm/m_warmup.glb")
 release_memory()
 

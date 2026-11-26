@@ -1,6 +1,5 @@
 import os, re, json, uuid, asyncio, subprocess
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
@@ -24,7 +23,9 @@ VIEW_DEFAULTS = {
 	"light_brightness": 1.0,     # множитель яркости всего освещения (1 — как по умолчанию)
 	"spin": -3.44,               # автовращение стола с моделью, градусы в секунду (0 — стоит)
 }
-view = {"version": 1, **VIEW_DEFAULTS}
+# distance_version — version правки, в которой расстояние задавали последний раз. Пользователь меняет масштаб
+# у себя в браузере, поэтому клиент берёт distance, только когда это число изменилось (а не при смене цвета и т. п.).
+view = {"version": 1, "distance_version": 1, **VIEW_DEFAULTS}
 VIEW_RANGES = {
 	"distance": (50, 5000),
 	"rot_x": (-360, 360), "rot_y": (-360, 360), "rot_z": (-360, 360),
@@ -36,7 +37,7 @@ VIEW_COLORS = ("color", "light_color")
 SEND_TIMEOUT = float(os.environ.get("SEND_TIMEOUT", "20"))
 # Параметры модели {имя: {"min", "max"}}: задаются только в PARAMS у worker.py, сюда приходят после каждого
 # запуска воркера (load_limits). Ключи — это и есть список параметров, своего списка у web.py нет.
-# Правки вне диапазона отбрасываются; клиенты берут пределы через GET /limits.
+# Правки вне диапазона отбрасываются; веб-клиент получает пределы в сообщении «model», остальные — через GET /limits.
 limits: dict = {}
 ready = None       # последняя опубликованная (актуальная) модель: {version, <параметры из Blender>, glb}
 last_error = None  # последняя ошибка актуальной версии: {version, error}
@@ -180,23 +181,34 @@ async def generation_loop():
 
 
 # ── Замер запаса памяти (cgroup v2, как на Render) ──
-# Фоновая задача ищет наименьший запас памяти и запоминает строкой: запас, время и параметры корзины.
-# memory.peak — наибольшая занятость контейнера с запуска; ядро ведёт его само, поэтому короткие всплески не теряются.
+# Фоновая задача ищет наименьший запас памяти и запоминает строкой: запас и параметры корзины.
+# Занятой считаем только память, которую нельзя освободить: процессы, /dev/shm и нужды ядра. Файловый кэш не считаем:
+# ядро заполняет им свободное место и освобождает по требованию, поэтому memory.peak доходит до лимита и без нехватки.
+# Всплески между замерами не видны, поэтому замеряем часто.
 blender_params: dict = {}  # параметры корзины, с которыми сейчас работает (или только что работал) Blender
 # Начальный запас заведомо больше любого настоящего: первый же замер станет «минимумом»
 mem_min = {"free": 99999999, "line": "нет данных"}
 
 
-def read_mb(name):
-	v = open(f"/sys/fs/cgroup/{name}").read().strip()
-	return 0 if v == "max" else int(v) / 1048576  # «max» = без лимита → 0 (ниже подставляем 512)
+def read_cgroup(name: str) -> str:
+	with open(f"/sys/fs/cgroup/{name}") as f:
+		return f.read().strip()
 
 
-MEM_LIMIT = read_mb("memory.max") or 512  # лимит не меняется, читаем один раз (без лимита, как локально, — 512 как на Render)
+def read_used_mb() -> float:
+	"""Занятая сейчас память контейнера без файлового кэша, МБ."""
+	stat = dict(line.split() for line in read_cgroup("memory.stat").splitlines())
+	# shmem — это /dev/shm: в статистике он входит и в файловый кэш (file), но освободить его нельзя
+	return sum(int(stat[key]) for key in ("anon", "shmem", "kernel")) / 1048576
+
+
+# Лимит не меняется, читаем один раз. «max» — без лимита (как локально): тогда берём 512, как на Render
+_max = read_cgroup("memory.max")
+MEM_LIMIT = 512 if _max == "max" else int(_max) / 1048576
 
 
 def sample_memory():
-	free = MEM_LIMIT - read_mb("memory.peak")
+	free = MEM_LIMIT - read_used_mb()
 	if free < mem_min["free"]:
 		params = " ".join(f"{k}={v:g}" for k, v in blender_params.items()) or "старт, до первой генерации"
 		mem_min["free"] = free
@@ -215,7 +227,7 @@ async def lifespan(app: FastAPI):
 	await start_worker()
 	loop_task = asyncio.create_task(generation_loop())
 	# Фоновый замер запаса памяти; MEM_SAMPLE_INTERVAL — период в секундах (0 — не замерять)
-	interval = float(os.environ.get("MEM_SAMPLE_INTERVAL", "0.5"))
+	interval = float(os.environ.get("MEM_SAMPLE_INTERVAL", "0.1"))
 	mem_task = asyncio.create_task(memory_sampler(interval)) if interval > 0 else None
 	yield
 	loop_task.cancel()
@@ -264,13 +276,22 @@ def parse_params(msg: dict) -> dict:
 	return patch
 
 
+def update_view(patch: dict):
+	"""Вносит проверенную правку в общий вид. Вызывать под блокировкой changed."""
+	view.update(patch)
+	view["version"] += 1
+	if "distance" in patch:  # даже если значение прежнее: его задали заново
+		view["distance_version"] = view["version"]
+
+
 async def send_loop(ws: WebSocket, conn: dict):
 	"""Единственный, кто пишет в это соединение: порядок «model → бинарный кадр» не нарушится."""
 	sent_ack = 0
 	sent_model = 0
 	sent_view = 0
-	# Старые ошибки новому клиенту не показываем — только те, что случатся при нём
-	sent_error = last_error["version"] if last_error else 0
+	# Старые ошибки новому клиенту не показываем — только те, что случатся при нём.
+	# Но если ни одной модели ещё нет, ошибку отправляем: иначе клиент будет ждать молча
+	sent_error = last_error["version"] if last_error and ready else 0
 
 	async def send(coro):
 		await asyncio.wait_for(coro, SEND_TIMEOUT)
@@ -305,6 +326,7 @@ async def send_loop(ws: WebSocket, conn: dict):
 					"type": "model",
 					"version": model["version"],
 					**pick_params(model),
+					"limits": limits,
 					"glb_bytes": len(model["glb"]),
 				}))
 				await send(ws.send_bytes(model["glb"]))
@@ -346,10 +368,11 @@ async def ws_endpoint(ws: WebSocket):
 			except (ValueError, KeyError, TypeError, AttributeError):
 				continue  # битое сообщение пропускаем, соединение не рвём
 			async with changed:
-				target = view if kind == "view" else state
-				target.update(patch)
-				target["version"] += 1
-				if kind == "params":
+				if kind == "view":
+					update_view(patch)
+				else:
+					state.update(patch)
+					state["version"] += 1
 					conn["ack"], conn["seq"] = state["version"], seq
 				changed.notify_all()
 	except WebSocketDisconnect:
@@ -366,7 +389,77 @@ async def get_limits():
 	return limits
 
 
+# Сколько секунд POST /params ждёт готовую модель; меньше таймаута клиента (PHP ждёт 25 с)
+PARAMS_WAIT = float(os.environ.get("PARAMS_WAIT", "20"))
+
+
+@app.get("/params")
+async def get_params():
+	"""Текущие значения параметров модели — у последней готовой модели; Blender не вызывается."""
+	if ready is None:
+		raise HTTPException(503, "модель ещё не готова")
+	return {"version": ready["version"], **pick_params(ready)}
+
+
+@app.post("/params")
+async def post_params(patch: dict):
+	"""Частичная правка параметров (как сообщение params по WebSocket); ждёт готовую модель.
+
+	Правка попадает в общую корзину: веб-клиенты получат новую модель как обычно.
+	Ответ — параметры последней рассчитанной модели (если следом пришла чужая правка, это будет
+	более новая модель) или ошибка: 500 — расчёт не удался, 504 — модель не готова за PARAMS_WAIT.
+	"""
+	try:
+		patch = parse_params(patch)
+	except (ValueError, TypeError) as e:
+		raise HTTPException(422, str(e))
+	async with changed:
+		state.update(patch)
+		state["version"] += 1
+		version = state["version"]
+		changed.notify_all()
+		try:
+			# Ждём результат (модель или ошибку) нашей или более новой версии:
+			# цикл генерации мог пропустить нашу, если следом пришла ещё правка
+			await asyncio.wait_for(changed.wait_for(lambda: max(
+				ready["version"] if ready else 0,
+				last_error["version"] if last_error else 0,
+			) >= version), PARAMS_WAIT)
+		except asyncio.TimeoutError:
+			raise HTTPException(504, f"модель не рассчитана за {PARAMS_WAIT:g} с")
+		# Итог — самый свежий результат: если последней была ошибка, сообщаем её
+		if last_error and last_error["version"] >= version and (ready is None or last_error["version"] > ready["version"]):
+			raise HTTPException(500, last_error["error"])
+		return {"version": ready["version"], **pick_params(ready)}
+
+
+@app.get("/view/limits")
+async def get_view_limits():
+	"""Допустимые значения числовых полей общего вида {имя: {min, max}} (VIEW_RANGES)."""
+	return {k: {"min": lo, "max": hi} for k, (lo, hi) in VIEW_RANGES.items()}
+
+
+@app.get("/view")
+async def get_view():
+	"""Текущий общий вид {version, color, distance, spin, …}."""
+	return dict(view)
+
+
+@app.post("/view")
+async def post_view(patch: dict):
+	"""Частичная правка общего вида (как сообщение view по WebSocket). Blender не нужен:
+	правка сразу рассылается всем клиентам, ответ — общий вид после неё."""
+	try:
+		patch = parse_view(patch)
+	except (ValueError, TypeError) as e:
+		raise HTTPException(422, str(e))
+	async with changed:
+		update_view(patch)
+		changed.notify_all()
+		return dict(view)
+
+
 @app.get("/memory")
 async def memory():
-	"""Одна строка: наименьший запас памяти с запуска, время и параметры корзины в тот момент."""
+	"""Одна строка: наименьший запас памяти с запуска и параметры корзины в тот момент."""
 	return PlainTextResponse(mem_min["line"])

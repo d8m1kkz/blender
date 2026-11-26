@@ -2,6 +2,7 @@
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
 // ── Константы ──
@@ -64,9 +65,12 @@ const ROOM_WALLS_BACKGROUND = [
 ]
 
 const canvasContainer = ref(null)
-// Параметры модели (имена — как в PARAMS у gen/worker.py), пределы берутся у gen (limits).
-// null — значение неизвестно, пока gen не пришлёт первую модель (оно берётся из сцены Blender): поле не показываем.
-const params = reactive({ x: 100, y: 100, z: 50, thickness: null, excavation_height: null, perforation: null })
+// Параметры модели (имена — как в PARAMS у gen/worker.py).
+// null — значение неизвестно, пока gen не пришлёт первую модель (оно берётся из сцены Blender).
+const params = reactive({ x: null, y: null, z: null, thickness: null, excavation_height: null, perforation: null })
+// Допустимые значения параметров ({x: {min, max}, …}): задаёт Blender-воркер, gen присылает их вместе с моделью.
+// Своих копий диапазонов здесь нет. Пока не пришла первая модель, элементов управления нет.
+const limits = ref(null)
 // Последнее допустимое значение каждого поля: к нему возвращаем, если ввод стёрли или он не число
 const lastValid = {}
 // Горизонтальные слайдеры; слайдер Z — отдельный, вертикальный
@@ -80,12 +84,15 @@ const NUMBER_CONTROLS = [
 
 // turntable — «поворотный столик»: в нём стол принтера и модель, автовращение крутит его целиком
 let scene, camera, renderer, controls, turntable, bed, currentModel, light, resizeObserver
-const loader = new GLTFLoader()
+// gen присылает модель в сжатии Draco; декодер лежит у нас в public_html/draco/ (копия из three)
+const dracoLoader = new DRACOLoader().setDecoderPath('/draco/')
+const loader = new GLTFLoader().setDRACOLoader(dracoLoader)
 
 // Общий вид (цвет, камера, ориентация, свет): приходит от gen сообщением «view».
 // Здесь последнее полученное — новой модели сразу выставляется текущая ориентация.
 let viewState = null
 let rotationSpeed = ROTATION_SPEED // автовращение, радиан за кадр; меняется сообщением «view»
+let distanceVersion = null // distance_version, чьё расстояние уже выставлено камере; null — ещё никакое
 
 // Применяет общий вид к сцене. Модель при повороте остаётся «на столе»: стол уходит под её нижнюю точку.
 const applyView = (v) => {
@@ -99,10 +106,16 @@ const applyView = (v) => {
 		orientModel(currentModel)
 		layerUniforms.uLayerBase.value = placeBed(bed, currentModel)
 	}
-	// Камера: то же направление на цель, другая дистанция
-	const offset = camera.position.clone().sub(controls.target)
-	camera.position.copy(controls.target).addScaledVector(offset.normalize(), v.distance)
-	controls.update()
+	// Камера: то же направление на цель, другая дистанция. Только если расстояние задали заново,
+	// иначе правка цвета и т. п. отменяла бы масштаб, выбранный пользователем.
+	// gen без distance_version: считаем заданным при каждой правке вида (version)
+	const version = v.distance_version ?? v.version
+	if (version !== distanceVersion) {
+		distanceVersion = version
+		const offset = camera.position.clone().sub(controls.target)
+		camera.position.copy(controls.target).addScaledVector(offset.normalize(), v.distance)
+		controls.update()
+	}
 }
 
 // Ориентация модели: повороты вокруг осей сцены (X — вдоль ширины, Y — вверх, Z — вдоль длины)
@@ -116,6 +129,9 @@ const orientModel = (model) => {
 // Сервер нумерует каждую правку любого клиента (version) и присылает модель вместе с x/y/z,
 // только если она актуальна: устаревшие (пока считали, пришла новая правка) не приходят вовсе.
 const connected = ref(false)
+// Выбран другой gen, и от него ещё нет ответа: на экране значения прежнего, поэтому их нельзя править.
+// Снимается моделью, ошибкой или неудачным подключением
+const switching = ref(false)
 let socket = null
 let stopped = false // компонент размонтирован — не переподключаемся
 let pendingHeader = null // заголовок «model», ждущий своего бинарного кадра с GLB
@@ -146,7 +162,14 @@ const startedByVersion = new Map() // version → performance.now() отправ
 
 const formatDuration = (ms) => (ms < 1000 ? `${Math.round(ms)} мс` : `${(ms / 1000).toFixed(1)} с`)
 
-// Все параметры модели из заголовка: имена берём из пределов (limits), пока их нет — из params.
+// Размер GLB в килобайтах (1 КБ = 1024 байта), целым числом
+const formatSize = (bytes) => `${Math.round(bytes / 1024)} КБ`
+
+// Короткая запись параметров для строки журнала: «x×y×z · остальные в порядке NUMBER_CONTROLS»
+const paramsShort = (header) =>
+	[['x', 'y', 'z'].map((k) => header[k]).join('×'), ...NUMBER_CONTROLS.map((c) => header[c.key])].join(' · ')
+
+// Все параметры модели из заголовка с именами (всплывающая подсказка): имена берём из пределов (limits), пока их нет — из params.
 // Сервер присылает все параметры (их значения читает из сцены Blender); проверка на undefined — только страховка.
 const paramsText = (header) =>
 	Object.keys(limits.value ?? params)
@@ -233,7 +256,14 @@ vec3 applyPrintLayers(vec3 n) {
 // Применяет PETG ко всем мешам модели
 const prepareModel = (model) => {
 	model.traverse((o) => {
-		if (o.isMesh) o.material = petgMaterial
+		if (!o.isMesh) return
+		// gen может присылать модель без нормалей (COMPACT_GLB в worker.py) — тогда затеняем грани плоско
+		const flat = !o.geometry.attributes.normal
+		if (petgMaterial.flatShading !== flat) {
+			petgMaterial.flatShading = flat
+			petgMaterial.needsUpdate = true // шейдер нужно пересобрать
+		}
+		o.material = petgMaterial
 	})
 }
 
@@ -256,11 +286,22 @@ const shouldApplyValues = (msg) => !hasUnacked() && msg.version >= lastAck.value
 
 // Заменяет модель на столе
 const showModel = async (header, buffer) => {
-	let gltf
+	const source = socket // соединение, по которому пришла модель
+	const size = formatSize(buffer.byteLength) // до разбора: загрузчик получает сам буфер
+	let gltf, parseError
 	try {
 		gltf = await loader.parseAsync(buffer, '')
 	} catch (e) {
-		logError(header.version, `разбор GLB: ${e?.message || e}`)
+		parseError = e
+	}
+	// Пока разбирали, соединение сменилось (выбран другой gen или обрыв): эта модель уже не нужна
+	if (source !== socket) {
+		if (gltf) disposeModel(gltf.scene)
+		return
+	}
+	switching.value = false
+	if (!gltf) {
+		logError(header.version, `разбор GLB: ${parseError?.message || parseError}`)
 		return
 	}
 	// Пока разбирали, могла показаться более новая модель
@@ -281,12 +322,13 @@ const showModel = async (header, buffer) => {
 
 	shownVersion.value = header.version
 	settledVersion.value = Math.max(settledVersion.value, header.version)
+	limits.value = header.limits
 	if (shouldApplyValues(header)) {
 		for (const key of Object.keys(params)) {
 			if (header[key] !== undefined) params[key] = lastValid[key] = header[key]
 		}
 	}
-	logEvent({ version: header.version, status: 'done', params: paramsText(header) })
+	logEvent({ version: header.version, status: 'done', params: paramsShort(header), title: paramsText(header), size })
 }
 
 const onMessage = (data) => {
@@ -310,6 +352,7 @@ const onMessage = (data) => {
 	} else if (msg.type === 'view') {
 		applyView(msg)
 	} else if (msg.type === 'error') {
+		switching.value = false
 		settledVersion.value = Math.max(settledVersion.value, msg.version)
 		logError(msg.version, msg.error)
 	}
@@ -344,69 +387,57 @@ const loadGens = async () => {
 	genIndex.value = saved >= 0 && saved < list.length ? saved : 0
 }
 
-// Допустимые значения параметров ({x: {min, max}, …}) задаёт Blender-воркер; gen отдаёт их отдельным запросом.
-// Своих копий диапазонов здесь нет: пока пределы не пришли, слайдеров нет. Адрес — выбранный gen, как у wsUrl.
-const limits = ref(null)
-let limitsRun = 0 // номер последнего запроса пределов: более ранние (в том числе от прежнего сервера) бросают свой цикл
-const loadLimits = async () => {
-	const run = ++limitsRun
-	while (!stopped && run === limitsRun) {
-		try {
-			const res = await fetch(genOrigin() + '/limits', { cache: 'no-store' })
-			if (run !== limitsRun) return
-			if (res.ok) {
-				limits.value = await res.json()
-				return
-			}
-		} catch { /* gen недоступен — пробуем снова */ }
-		await pause()
-	}
+// Забывает текущее соединение и закрывает его: всё, что ещё придёт по нему, не принимается
+const dropSocket = () => {
+	const old = socket
+	socket = null
+	connected.value = false
+	pendingHeader = null
+	ackedSeq.value = sentSeq.value // подтверждения по этому соединению уже не придут
+	old?.close()
 }
 
-// Номера версий прежнего соединения или сервера для нового ничего не значат
-const forgetVersions = () => {
-	lastAck.value = 0
-	shownVersion.value = 0
-	settledVersion.value = 0
-}
-
-// Переключение на другой gen: у него своя корзина и свои пределы, поэтому всё прежнее забываем.
-// Закрытие сокета запускает обычное переподключение (onclose → connect), уже по новому адресу.
+// Переключение на другой gen: у него своя корзина. Значения и пределы прежнего остаются на экране,
+// пока не придут новые; журнал очищаем и сразу подключаемся по новому адресу.
 const selectGen = (index) => {
 	index = Number(index)
 	if (index === genIndex.value) return
 	genIndex.value = index
 	try { localStorage.setItem(GEN_STORAGE_KEY, String(index)) } catch { /* хранилище недоступно */ }
-	limits.value = null
-	limitsRun++ // отменяет запрос пределов прежнего сервера
+	switching.value = true
 	events.value = []
 	errorCount.value = 0
-	forgetVersions()
-	pendingHeader = null
-	socket?.close()
+	distanceVersion = null // у другого gen своя нумерация: берём его расстояние
+	dropSocket()
+	connect()
 }
 
 const connect = () => {
 	if (stopped || socket) return
-	socket = new WebSocket(wsUrl())
-	socket.binaryType = 'arraybuffer'
-	socket.onopen = () => {
+	const ws = new WebSocket(wsUrl())
+	socket = ws
+	ws.binaryType = 'arraybuffer'
+	// События отброшенного соединения (ws !== socket) пропускаем
+	ws.onopen = () => {
+		if (ws !== socket) return
 		connected.value = true
-		loadLimits() // gen мог перезапуститься с другими пределами: спрашиваем при каждом подключении
-		// gen мог перезапуститься и начать нумерацию заново: забываем старые версии.
+		// gen мог перезапуститься и начать нумерацию заново (а у другого gen она своя): забываем старые версии.
 		// Сразу после подключения сервер пришлёт текущую корзину.
 		ackedSeq.value = sentSeq.value
 		sentAtBySeq.clear()
 		startedByVersion.clear()
-		forgetVersions()
+		lastAck.value = 0
+		shownVersion.value = 0
+		settledVersion.value = 0
 	}
-	socket.onmessage = (e) => onMessage(e.data)
+	ws.onmessage = (e) => {
+		if (ws === socket) onMessage(e.data)
+	}
 	// Обрыв или неудачное подключение (gen ещё прогревает Blender) — пробуем снова
-	socket.onclose = () => {
-		connected.value = false
-		pendingHeader = null
-		ackedSeq.value = sentSeq.value // подтверждения по этому соединению уже не придут
-		socket = null
+	ws.onclose = () => {
+		if (ws !== socket) return
+		dropSocket()
+		switching.value = false // gen не отвечает: поля снова доступны
 		if (!stopped) setTimeout(connect, RECONNECT_DELAY)
 	}
 }
@@ -441,15 +472,7 @@ const sendParams = () => {
 	if (socket?.readyState !== WebSocket.OPEN) return
 	sentSeq.value++
 	sentAtBySeq.set(sentSeq.value, performance.now())
-	// Параметры без значения (первая модель ещё не пришла) не отправляем
-	const known = Object.fromEntries(Object.entries(params).filter(([, v]) => v !== null))
-	socket.send(JSON.stringify({ type: 'params', ...known, seq: sentSeq.value }))
-}
-
-// Возврат к исходному виду: камера, точка обзора и поворот столика с моделью
-const resetView = () => {
-	controls?.reset()
-	turntable?.rotation.set(0, 0, 0)
+	socket.send(JSON.stringify({ type: 'params', ...params, seq: sentSeq.value }))
 }
 
 // Полноэкранный режим области 3D-модели.
@@ -630,7 +653,6 @@ onMounted(() => {
 	controls.touches = { ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_ROTATE }
 	controls.enableDamping = true
 	controls.target.set(0, 0, 0)
-	controls.saveState() // исходный вид, к которому вернёт resetView
 
 	// Базовое освещение сцены
 	// Тёплый основной свет: цветовой контраст с холодным «окном» делает освещение живее
@@ -701,15 +723,18 @@ onMounted(() => {
 	<div class="layout">
 		<div class="viewer-wrapper">
 
-			<div class="controls">
+			<fieldset class="controls" :disabled="switching">
 				<template v-if="limits">
-					<label v-for="key in TOP_SLIDERS" :key="key" class="slider">
-						<span>{{ key.toUpperCase() }}</span>
-						<input v-model.number="params[key]" type="range" :min="limits[key].min" :max="limits[key].max" step="1" @input="sendParams" />
-						<output>{{ params[key] }}</output>
-					</label>
-					<template v-for="c in NUMBER_CONTROLS" :key="c.key">
-						<div v-if="params[c.key] !== null" class="num" :title="c.title">
+					<!-- Две группы: если все элементы не помещаются в строку, числовые поля переносятся под X и Y -->
+					<div class="sliders">
+						<label v-for="key in TOP_SLIDERS" :key="key" class="slider">
+							<span>{{ key.toUpperCase() }}</span>
+							<input v-model.number="params[key]" type="range" :min="limits[key].min" :max="limits[key].max" step="1" @input="sendParams" />
+							<output>{{ params[key] }}</output>
+						</label>
+					</div>
+					<div class="nums">
+						<div v-for="c in NUMBER_CONTROLS" :key="c.key" class="num" :title="c.title">
 							<button
 								type="button"
 								class="num-btn"
@@ -734,14 +759,14 @@ onMounted(() => {
 								@click="stepNumber(c, 1)"
 							>+</button>
 						</div>
-					</template>
+					</div>
 				</template>
-			</div>
+			</fieldset>
 
 			<div class="viewer-row">
 				<label v-if="limits" class="slider-z">
 					<span>Z</span>
-					<input v-model.number="params.z" type="range" :min="limits.z.min" :max="limits.z.max" step="1" class="vertical" @input="sendParams" />
+					<input v-model.number="params.z" type="range" :min="limits.z.min" :max="limits.z.max" step="1" class="vertical" :disabled="switching" @input="sendParams" />
 					<output>{{ params.z }}</output>
 				</label>
 
@@ -753,7 +778,7 @@ onMounted(() => {
 					</div>
 					<button
 						type="button"
-						class="view-btn fullscreen-toggle"
+						class="fullscreen-toggle"
 						:title="fullscreenTitle"
 						:aria-label="fullscreenTitle"
 						@click="toggleFullscreen"
@@ -763,7 +788,6 @@ onMounted(() => {
 							<path :d="isFullscreen ? 'M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5' : 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5'" />
 						</svg>
 					</button>
-					<button type="button" class="view-btn reset-view" title="Вернуть исходный вид" aria-label="Вернуть исходный вид" @click="resetView">⟲</button>
 				</div>
 			</div>
 		</div>
@@ -777,7 +801,8 @@ onMounted(() => {
 			<ul class="queue-list">
 				<li v-for="ev in reversedEvents" :key="ev.id" class="job" :class="ev.status">
 					<div class="job-row">
-						<span class="job-params">{{ ev.params }}</span>
+						<span class="job-params" :title="ev.title">{{ ev.params }}</span>
+						<span v-if="ev.size" class="job-size" title="Размер модели GLB">{{ ev.size }}</span>
 						<span class="job-duration">{{ ev.time }}</span>
 						<span v-if="ev.status !== 'done'" class="badge" :class="ev.status">{{ ev.status }}</span>
 					</div>
@@ -786,7 +811,7 @@ onMounted(() => {
 				<li v-if="!events.length" class="empty">Моделей пока нет</li>
 			</ul>
 
-			<label v-if="gens.length > 1" class="gen-select">
+			<label v-if="gens.length" class="gen-select">
 				<select :value="genIndex" @change="selectGen($event.target.value)">
 					<option v-for="(origin, i) in gens" :key="origin" :value="i">{{ genLabel(origin) }}</option>
 				</select>
@@ -886,9 +911,13 @@ label.slider-z {
 	display: flex;
 	align-items: center;
 	gap: 8px;
+	white-space: nowrap;
 }
 .job-params {
 	flex: 1;
+	min-width: 0; /* в узкой панели обрезается многоточием, а не переносится */
+	overflow: hidden;
+	text-overflow: ellipsis;
 	font-variant-numeric: tabular-nums;
 }
 .badge {
@@ -899,11 +928,11 @@ label.slider-z {
 	background: rgba(255, 255, 255, 0.08);
 }
 .badge.error { color: #f87171; }
+.job-size,
 .job-duration {
 	font-size: 0.7rem;
 	color: #94a9c4;
 	font-variant-numeric: tabular-nums;
-	white-space: nowrap;
 }
 .job-error {
 	margin-top: 4px;
@@ -927,10 +956,12 @@ label.slider-z {
 }
 .controls {
 	display: flex;
-	flex-direction: row; /* X и Y в одной строке */
-	gap: 16px;
+	flex-wrap: wrap;
+	gap: 12px 16px;
 	align-items: center;
 	padding: 12px 14px;
+	margin: 0; /* это fieldset: убираем родные отступы и даём сжиматься */
+	min-width: 0;
 }
 label {
 	display: flex;
@@ -949,6 +980,21 @@ label span {
 	border-radius: 6px;
 	background: rgba(125, 211, 252, 0.12);
 	color: #7dd3fc;
+}
+/* Ширина строки меньше «340px + числовые поля» — поля переносятся на вторую строку.
+   Большой flex-grow: пока всё в одной строке, свободное место достаётся ползункам */
+.sliders {
+	display: flex;
+	flex: 999 1 340px;
+	gap: 16px;
+	min-width: 0;
+}
+.nums {
+	display: flex;
+	flex: 1 1 auto;
+	justify-content: space-between;
+	gap: 16px;
+	min-width: 0;
 }
 label.slider {
 	flex: 1 1 0; /* X и Y делят строку поровну */
@@ -970,10 +1016,11 @@ input[type='range']:focus {
 	display: flex;
 	align-items: center;
 	gap: 4px;
-	flex: 0 0 auto;
+	min-width: 0; /* на узком экране сжимается поле ввода */
 }
 .num input {
 	width: 56px;
+	min-width: 0;
 	text-align: center;
 	appearance: textfield; /* родные стрелки справа скрыты: вместо них кнопки по бокам */
 	-moz-appearance: textfield;
@@ -984,6 +1031,7 @@ input[type='range']:focus {
 	margin: 0;
 }
 .num-btn {
+	flex: none;
 	width: 28px;
 	height: 32px;
 	padding: 0;
@@ -1026,6 +1074,10 @@ input {
 input:focus {
 	border-color: #7dd3fc;
 	box-shadow: 0 0 0 3px rgba(125, 211, 252, 0.2);
+}
+input:disabled {
+	opacity: 0.35;
+	cursor: default;
 }
 button {
 	padding: 8px 18px;
@@ -1095,10 +1147,11 @@ label.slider-z output {
 .canvas-wrap.is-fullscreen .overlay {
 	border-radius: 0;
 }
-/* Кнопки поверх 3D-вида */
-button.view-btn {
+/* Кнопка поверх 3D-вида */
+button.fullscreen-toggle {
 	position: absolute;
 	top: 10px;
+	left: 10px;
 	z-index: 2;
 	width: 36px;
 	height: 36px;
@@ -1106,19 +1159,11 @@ button.view-btn {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	font-size: 1.25rem;
-	line-height: 1;
 	border-radius: 10px;
 	background: rgba(15, 23, 36, 0.75);
 	border: 1px solid rgba(125, 211, 252, 0.35);
 	color: #7dd3fc;
 	box-shadow: none;
-}
-button.reset-view {
-	right: 10px;
-}
-button.fullscreen-toggle {
-	left: 10px;
 }
 .overlay {
 	position: absolute;
@@ -1163,6 +1208,65 @@ button.fullscreen-toggle {
 		width: auto;
 		height: 280px;
 		flex: none;
+	}
+}
+/* Телефоны: меньше отступы, чтобы больше места досталось элементам управления и модели */
+@media (max-width: 600px) {
+	.layout {
+		gap: 12px;
+	}
+	.viewer-wrapper {
+		gap: 10px;
+		padding: 8px;
+	}
+	.controls {
+		gap: 10px;
+		padding: 8px;
+	}
+	.sliders {
+		gap: 12px;
+	}
+	.sliders label {
+		gap: 6px;
+	}
+	.nums {
+		gap: 8px;
+	}
+	.num {
+		gap: 2px;
+	}
+	.num-btn {
+		width: 26px;
+		height: 36px;
+	}
+	.num input {
+		padding: 6px 0;
+		font-size: 16px; /* при меньшем шрифте iPhone увеличивает страницу при вводе */
+	}
+	.viewer-row {
+		gap: 8px;
+	}
+	label.slider-z {
+		padding: 8px 2px;
+	}
+	.queue-panel {
+		padding: 14px 12px;
+	}
+}
+/* Самые узкие телефоны: иначе значение в числовом поле не помещается */
+@media (max-width: 360px) {
+	.nums {
+		gap: 6px;
+	}
+	.num-btn {
+		width: 24px;
+	}
+}
+/* Вертикальный экран: оставляем снизу полосу, за которую можно прокрутить страницу (жесты на модели её не прокручивают) */
+@media (max-width: 900px) and (orientation: portrait) {
+	.canvas-box {
+		height: max(280px, 65vh);
+		height: max(280px, 65svh); /* высота окна с учётом адресной строки браузера */
 	}
 }
 </style>

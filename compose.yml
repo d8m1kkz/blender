@@ -1,7 +1,12 @@
-# Основной файл — PRODUCTION без HTTPS (обычный VPS, доступ по http://<IP>). Его же deploy.sh кладёт на VPS.
+# Основной файл — PRODUCTION без HTTPS (всё на одной машине, доступ по http://<IP>).
+# Скрипты scripts/deploy.vps.*.sh его не используют: на VPS едет compose.vps.yml (только gen и caddy).
 # Вариант с caddy и HTTPS (sslip.io) лежит в запасе: compose.caddy.yml накладывается поверх этого файла.
 # Для разработки рядом лежит compose.override.yml: `docker compose up` подхватывает его сам и накладывает отличия.
 # Явно production (без override): `docker compose -f compose.yml ...`
+# Сервис gen описан в compose_gen.yml и подключается через include.
+
+include:
+  - compose_gen.yml
 
 # Лимит логов Docker (иначе json-file растёт бесконечно): до 3 файлов по 10 МБ на контейнер
 x-logging: &default-logging
@@ -33,25 +38,15 @@ services:
       context: ./php
       target: app
     env_file:
-      - ./php/.env.beget # настройки Laravel (APP_ENV, APP_DEBUG, APP_KEY…) для production
+      - ./php/.env.beget # настройки Laravel (APP_ENV, APP_KEY…, GEN_ORIGINS) для production
     environment:
-      - GEN_ORIGINS=${GEN_ORIGINS:?задайте GEN_ORIGINS в .env} # адреса gen для выбора в интерфейсе (первый — по умолчанию)
+      - GEN_URL=http://gen:8080 # адрес gen для MCP (<сайт>/mcp): запросы идут из контейнера php, а не из браузера
     volumes:
       - app-storage:/var/www/html/storage
     logging: *default-logging
     restart: unless-stopped
     depends_on:
       - gen
-
-  gen:
-    image: d8m1kkz/blender-gen:latest
-    build:
-      context: ./gen
-    environment:
-      - PYTHONUNBUFFERED=1
-    shm_size: '256mb'
-    logging: *default-logging
-    restart: unless-stopped
 
 volumes:
   app-storage:

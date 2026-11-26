@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# Первый деплой сайта (php/) на Beget в пустую папку ~/blender.
+# Деплой сайта (php/) на Beget в папку ~/blender: первый и повторный (обновление).
 # gen (Blender) здесь не запускается: он должен жить отдельно, по https.
+# Использование: scripts/deploy.beget.sh
 set -euo pipefail
-cd "$(dirname "$0")/php"
+cd "$(dirname "$0")/../php"
 
 # Собрать JS и CSS локально: на Beget нет Node
 npm run build
 
-# Скопировать нужное (hot и fonts-manifest.dev.json нужны только в разработке)
-rsync -rlptz --exclude=hot --exclude=fonts-manifest.dev.json public_html/ beget:blender/public_html/
-rsync -rlptz app bootstrap config routes beget:blender/
-rsync -rlptzR resources/views beget:blender/
+# Скопировать нужное (hot и fonts-manifest.dev.json нужны только в разработке).
+# --delete удаляет на сервере файлы, которых больше нет локально (только внутри этих папок).
+rsync -rlptz --delete --exclude=hot --exclude=fonts-manifest.dev.json public_html/ beget:blender/public_html/
+rsync -rlptz --delete app bootstrap config routes beget:blender/
+rsync -rlptzR --delete resources/views beget:blender/
 rsync -rlptz artisan composer.json composer.lock beget:blender/
 scp .env.beget beget:blender/.env   # настройки (APP_URL, GEN_ORIGINS…) лежат в php/.env.beget
 
@@ -20,6 +22,7 @@ ssh beget '[ -f composer.phar ] || curl -fsSL https://getcomposer.org/download/l
 	cd blender &&
 	php8.5 ~/composer.phar install --no-dev --optimize-autoloader &&
 	mkdir -p storage/framework/{cache,sessions,views} storage/logs &&
-	chmod -R 775 storage bootstrap/cache'
+	chmod -R 775 storage bootstrap/cache &&
+	php8.5 artisan view:clear'   # сбросить скомпилированные шаблоны Blade
 
 echo "Готово: https://d8m1k.bget.ru"

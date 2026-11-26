@@ -1,0 +1,23 @@
+# ЧАСТЬ, а не самостоятельная система: только для include из конечных compose-файлов
+# (compose.yml, compose.vps.yml). Об этом говорит подчёркивание в имени: compose_<имя>.yml.
+# Пути (build.context) считаются от папки этого файла.
+
+# Лимит логов Docker (иначе json-file растёт бесконечно): до 3 файлов по 10 МБ на контейнер.
+# Якорь действует только внутри своего файла, поэтому настройка повторена и в подключающих файлах.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # Сервис генерации (Blender + FastAPI), слушает порт 8080 внутри сети compose.
+  gen:
+    image: d8m1kkz/blender-gen:latest
+    build:
+      context: ./gen
+    environment:
+      - PYTHONUNBUFFERED=1
+    shm_size: '256mb'
+    logging: *default-logging
+    restart: unless-stopped
