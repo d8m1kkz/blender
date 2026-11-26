@@ -4,16 +4,25 @@
 
 ## Суть проекта
 
-Учебный проект (без production-требований). Пользователь задаёт размеры корзины (x, y, z и форму), сервер `gen` строит 3D-модель в Blender (Geometry Nodes) и отдаёт её как GLB, браузер показывает её через Three.js.
+Учебный проект (без production-требований): корзина для 3D-печати, которую можно менять из разных клиентов.
+
+Сервер `gen` хранит состояние корзины (около десяти параметров) и по нему строит 3D-модель в Blender (Geometry Nodes, формат GLB). Клиенты подключаются к `gen`, показывают текущее состояние и модель и отправляют запросы на изменение. После каждого изменения `gen` рассылает новое состояние и модель всем своим клиентам. Поэтому все клиенты одного `gen` видят одно и то же.
+
+Клиенты бывают разные, например веб-страница (Vue + Three.js) и MCP-сервер для LLM-агентов. Каждый клиент может показывать и менять свой набор параметров.
+
+Параметры бывают двух видов. Параметры модели пересчитываются в Blender за несколько секунд. Параметры вида (цвет, камера, вращение) применяются сразу, Blender в них не участвует.
 
 ```
-Браузер (Vue + Three.js) ──WebSocket──► gen (FastAPI) ──► Blender-воркер
+Браузер (Vue + Three.js) ────WebSocket────┐
+                                          ├──► gen (FastAPI) ──► Blender-воркер
+LLM-агент ──► MCP-сервер (Laravel) ──HTTP─┘
 ```
 
 - `nginx/` — `Dockerfile` и `nginx.conf` сервиса `nginx`: раздаёт статику (копирует её из образа `php`) и передаёт PHP-запросы в `php`.
-- `php/` — Laravel + Vite + Vue, сервис `php` (php-fpm с кодом). Laravel почти ничего не делает: отдаёт страницу с компонентом `ModelViewer.vue` и список адресов `gen` (`/gens`). Ещё здесь MCP-сервер `<сайт>/mcp` (пакет `laravel/mcp`: `routes/ai.php`, `app/Mcp/`): по инструменту `get_*`/`set_*` на каждый параметр, ходит в `gen` по HTTP: параметры модели — `GET /limits`, `GET /params`, `POST /params`; параметры общего вида (вращение, камера) — `GET /view/limits`, `GET /view`, `POST /view`.
+- `php/` — Laravel + Vite + Vue, сервис `php` (php-fpm с кодом). Laravel почти ничего не делает: отдаёт страницу с компонентом `ModelViewer.vue` и список адресов `gen` (`/gens`). Ещё здесь MCP-сервер `<сайт>/mcp` (пакет `laravel/mcp`: `routes/ai.php`, `app/Mcp/`): по инструменту `get_*`/`set_*` на каждый параметр, ходит в `gen` по HTTP: параметры модели — `GET /limits`, `GET /params`, `POST /params`; параметры общего вида (вращение, камера, цвет) — `GET /view/limits`, `GET /view`, `POST /view`.
 - `gen/` — сервис генерации: `web.py` (FastAPI), `worker.py` (долгоживущий Blender), `basket.blend` (сцена).
-- `scripts/` — все скрипты `.sh`: сборка образов (`prepare.sh`), деплой сайта (`deploy.beget.sh`) и `gen` (`deploy.vps.beget.sh`, `deploy.vps.immers.sh`), проверки (`check.begetvps.sh` — что установлено и запущено на VPS Beget, `chech.poll_mem.sh` — опрос `GET /memory` развёрнутого `gen`, наименьший запас памяти).
+- `caddy/` — `Caddyfile` только для запасного варианта с HTTPS перед сайтом (`compose.caddy.yml`).
+- `scripts/` — все скрипты `.sh`: сборка образов (`prepare.sh`), деплой сайта (`deploy.beget.sh`) и `gen` (`deploy.vps.beget.sh`, `deploy.vps.immers.sh`), проверки (`check.begetvps.sh` — что установлено и запущено на VPS Beget, `check.poll_mem.sh` — опрос `GET /memory` развёрнутого `gen`, наименьший запас памяти).
 - Браузер подключается к выбранному `gen` напрямую (WebSocket); сайт лишь даёт список адресов `GEN_ORIGINS`.
 
 ## Принципы
@@ -42,7 +51,7 @@ scripts/deploy.beget.sh                       # деплой сайта (без 
 scripts/deploy.vps.beget.sh [домен]           # деплой gen и caddy на VPS Beget (ssh-алиас begetvps, root, Docker уже стоит)
 scripts/deploy.vps.immers.sh [IP] [домен]     # то же на VPS immers: ставит Docker; без IP — 81.94.159.64; не скачался образ — передаёт локальный
 scripts/check.begetvps.sh                     # отчёт о VPS Beget (только чтение) — на экран и в scripts/vps-report.txt
-scripts/chech.poll_mem.sh [адрес gen] [сек]   # следить за памятью развёрнутого gen
+scripts/check.poll_mem.sh [адрес gen] [сек]   # следить за памятью развёрнутого gen
 ```
 
 - Перед сборкой `gen` в `gen/` должен лежать `blender-linux-x64.tar.xz` (в git его нет).
