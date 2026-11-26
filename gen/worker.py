@@ -21,7 +21,6 @@ DRACO_OPTIONS = {
 	"export_normals": True,
 	"export_draco_normal_quantization": 10,
 }
-
 obj = bpy.data.objects['Basket']
 dimensions = bpy.data.node_groups["_dimensions"]
 
