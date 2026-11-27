@@ -27,15 +27,13 @@ dimensions = bpy.data.node_groups["_dimensions"]
 
 # Реестр параметров сцены: имя параметра → (сокет в группе нод, где лежит значение; минимум; максимум).
 # Через один и тот же сокет значение и задаём, и читаем обратно (read_params).
-# Пределы — допустимые значения параметра: их проверяет gen и по запросу {"op":"limits"} получает отсюда;
-# клиенты (веб) берут их у gen (GET /limits), своих копий нигде нет.
-# Новый параметр = одна строка здесь; сигнатуры generate/handle и протокол не меняются.
+# Пределы — допустимые значения параметра: их проверяет gen, а получает отсюда по запросу {"op":"limits"}.
 Param = namedtuple("Param", "socket min max")
 PARAMS = {
 	"x": Param(lambda: dimensions.nodes["Value"].outputs[0], 20, 256),  # 256 — стол принтера Bambu Lab A1
 	"y": Param(lambda: dimensions.nodes["Value.001"].outputs[0], 20, 256),
 	"z": Param(lambda: dimensions.nodes["Group Output"].inputs[3], 20, 150),
-	"thickness": Param(lambda: dimensions.nodes["Group Output"].inputs[5], 0.4, 10),
+	"thickness": Param(lambda: dimensions.nodes["Group Output"].inputs[5], 0.4, 5),
 	"excavation_height": Param(lambda: dimensions.nodes["Group Output"].inputs[6], 0, 150),
 	"perforation": Param(lambda: dimensions.nodes["Group Output"].inputs[7], 10, 100),
 }
@@ -98,7 +96,7 @@ def generate(params, out):
 
 
 def release_memory():
-	"""Убирает мусор после расчёта, чтобы память процесса не ползла вверх (лимит Render — 512 МБ).
+	"""Убирает мусор после расчёта, чтобы память процесса не ползла вверх.
 
 	Экспортёр glTF плодит много Python-объектов со взаимными ссылками: сборщик мусора убирает их не сразу,
 	и пока они лежат, пик растёт на десятки МБ. Затем отдаём системе свободное у аллокаторов
@@ -117,19 +115,19 @@ def handle(conn):
 		try:
 			req = json.loads(line)
 			if req.get("op") == "limits":
-				# Не расчёт: пределы параметров из реестра (gen спрашивает после каждого запуска воркера)
+				# Пределы параметров из реестра (gen спрашивает после каждого запуска воркера)
 				resp = {"ok": True, "limits": LIMITS}
 			else:
 				out = req.pop("out")
 				values = generate({k: float(v) for k, v in req.items()}, out)
-				time.sleep(EXTRA_DELAY)  # имитация долгого расчёта; прогрев её не затрагивает
+				time.sleep(EXTRA_DELAY)  # имитация долгого расчёта
 				resp = {"ok": True, "params": values}
 		except Exception as e:
 			traceback.print_exc()
 			resp = {"ok": False, "error": f"{type(e).__name__}: {e}"}
 		f.write(json.dumps(resp).encode() + b"\n")
 		f.flush()
-		release_memory()  # после ответа: клиент уже получил модель и не ждёт очистку
+		release_memory()  # после ответа, чтобы очистка не задерживала модель
 
 
 # Прогрев: первый экспорт импортирует glTF-аддон. Делаем это до публикации сокета

@@ -11,8 +11,8 @@ use Laravel\Mcp\Server\Attributes\Name;
 use Laravel\Mcp\Server\Attributes\Version;
 
 /**
- * MCP-сервер корзины (адрес <сайт>/mcp, см. routes/ai.php). Сам состояния не хранит:
- * каждый вызов — HTTP-запрос к gen, поэтому правки попадают в ту же общую корзину, что видят браузеры.
+ * MCP-сервер корзины (адрес <сайт>/mcp, см. routes/ai.php).
+ * Каждый вызов — HTTP-запрос к gen, поэтому правки попадают в ту же общую корзину, что видят браузеры.
  */
 #[Name('basket')]
 #[Version('1.0.0')]

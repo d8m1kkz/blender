@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # Деплой сайта (php/) на Beget в папку ~/blender: первый и повторный (обновление).
-# gen (Blender) здесь не запускается: он должен жить отдельно, по https.
 # Использование: scripts/deploy.beget.sh
 set -euo pipefail
 cd "$(dirname "$0")/../php"
@@ -14,7 +13,8 @@ rsync -rlptz --delete --exclude=hot --exclude=fonts-manifest.dev.json public_htm
 rsync -rlptz --delete app bootstrap config routes beget:blender/
 rsync -rlptzR --delete resources/views beget:blender/
 rsync -rlptz artisan composer.json composer.lock beget:blender/
-scp .env.beget beget:blender/.env   # настройки (APP_URL, GEN_ORIGINS…) лежат в php/.env.beget
+# .env на сервере: настройки из php/.env.beget (APP_URL, GEN_ORIGINS…) и APP_KEY из php/.env.beget.key
+cat .env.beget .env.beget.key | ssh beget 'cat > blender/.env'
 
 # На сервере: поставить зависимости, создать папки и выдать права на запись.
 # Команды composer-phpX.Y на Beget — это Composer 1, а Laravel 13 нужен Composer 2: скачиваем composer.phar

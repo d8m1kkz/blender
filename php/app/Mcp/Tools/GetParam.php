@@ -11,7 +11,7 @@ use Laravel\Mcp\ResponseFactory;
 use Laravel\Mcp\Server\Tool;
 use Laravel\Mcp\Server\Tools\Annotations\IsReadOnly;
 
-/** Чтение одного параметра (get_<имя>): значение у последней готовой модели или у общего вида, без пересчёта в Blender. */
+/** Чтение одного параметра (get_<имя>): значение у последней готовой модели или у общего вида. */
 #[IsReadOnly]
 class GetParam extends Tool
 {

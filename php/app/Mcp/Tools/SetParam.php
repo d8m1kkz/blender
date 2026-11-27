@@ -63,7 +63,7 @@ class SetParam extends Tool
 		return ['required', 'numeric', "between:{$limit['min']},{$limit['max']}"];
 	}
 
-	/** Пределы берём у gen; если он недоступен — схема без них (gen всё равно проверит значение). */
+	/** Пределы берём у gen; если он недоступен — схема без них. */
 	public function schema(JsonSchema $schema): array
 	{
 		if ($this->param->color) {

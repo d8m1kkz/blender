@@ -4,7 +4,7 @@ namespace App\Mcp;
 
 /**
  * Параметр корзины для MCP: имя в инструментах, имя в протоколе gen и описание для модели.
- * Пределы здесь не хранятся: их источник — gen (параметры модели — реестр PARAMS в gen/worker.py,
+ * Источник пределов — gen (параметры модели — реестр PARAMS в gen/worker.py,
  * параметры вида — VIEW_RANGES в gen/web.py).
  */
 final readonly class Param
@@ -14,8 +14,8 @@ final readonly class Param
 		public string $key,   // имя в gen (x, y, z, thickness…)
 		public string $title, // по-русски, для заголовков
 		public string $about, // что это и в чём измеряется
-		public bool $view = false, // параметр общего вида (цвет, камера, вращение): Blender не пересчитывает модель
-		public bool $color = false, // значение — цвет строкой #rrggbb, а не число (пределов нет)
+		public bool $view = false, // параметр общего вида (цвет, камера, вращение)
+		public bool $color = false, // значение — цвет строкой #rrggbb
 	) {}
 
 	/** Все параметры, в порядке инструментов. */

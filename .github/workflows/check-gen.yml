@@ -1,0 +1,33 @@
+# Проверка образа gen в pull request из dev в main: образ собирается, запускается и строит модель.
+name: Проверка gen
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Скачать репозиторий
+        uses: actions/checkout@v5
+
+      # Кэш сборки берётся с Docker Hub (его записывает deploy-gen.yml), поэтому сборка быстрая
+      - name: Собрать образ gen
+        run: |
+          docker buildx create --use
+          docker buildx bake -f compose_gen.yml gen --load \
+            --set "gen.cache-from=type=registry,ref=d8m1kkz/blender-gen:buildcache"
+
+      # GET /params отвечает успешно, только когда Blender построил модель
+      - name: Запустить gen и дождаться модели
+        run: |
+          docker run -d --name gen --shm-size=256mb -p 8080:8080 d8m1kkz/blender-gen:latest
+          curl -fsS -m 5 --retry 40 --retry-delay 3 --retry-all-errors http://localhost:8080/params || {
+            docker logs gen
+            exit 1
+          }

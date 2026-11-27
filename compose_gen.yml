@@ -1,5 +1,4 @@
-# ЧАСТЬ, а не самостоятельная система: только для include из конечных compose-файлов
-# (compose.yml, compose.vps.yml). Об этом говорит подчёркивание в имени: compose_<имя>.yml.
+# Только для include из конечных compose-файлов (compose.yml, compose.vps.yml).
 # Пути (build.context) считаются от папки этого файла.
 
 # Лимит логов Docker (иначе json-file растёт бесконечно): до 3 файлов по 10 МБ на контейнер.

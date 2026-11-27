@@ -1,6 +1,6 @@
 # ЗАПАСНОЙ вариант: production с caddy и HTTPS (<IP>.sslip.io). Здесь только отличия от compose.yml.
 # Запуск: docker compose -f compose.yml -f compose.caddy.yml up -d  (нужны SITE_HOST в .env и caddy/Caddyfile).
-# compose.override.yml (разработка) при явных -f не подхватывается. Для https-страницы адреса в GEN_ORIGINS — только https.
+# Для https-страницы адреса в GEN_ORIGINS — только https.
 
 services:
   # HTTPS: сам получает и продлевает сертификат Let's Encrypt для SITE_HOST (<IP>.sslip.io).
@@ -25,7 +25,7 @@ services:
     depends_on:
       - nginx
 
-  # Порт nginx наружу не публикуется: снаружи вход один — caddy (80/443)
+  # Снаружи вход один — caddy (80/443)
   nginx:
     ports: !reset []
 

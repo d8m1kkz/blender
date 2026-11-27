@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Деплой gen и caddy (compose.vps.yml) на VPS, идемпотентный.
+# Деплой gen и caddy (compose.vps.yml) на VPS.
 # Образ gen берётся с Docker Hub: туда его отправляет GitHub Actions (.github/workflows/deploy-gen.yml).
 # Если VPS не может скачать образ, он передаётся напрямую с этой машины (docker save | docker load).
 # Использование: scripts/deploy.vps.immers.sh [IP-адрес] [домен]
@@ -34,7 +34,6 @@ tar cf - compose.vps.yml compose_gen.yml |
 # По одному сервису: получить образ, перезапустить, сразу удалить старый образ (экономит диск).
 # Имена образов те же, что в compose_gen.yml и compose.vps.yml.
 # --remove-orphans удаляет контейнеры сервисов, которых нет в compose.vps.yml
-# (прежние nginx и php; nginx держал бы порт 80, нужный caddy)
 COMPOSE="cd app && sudo docker compose -f compose.vps.yml"
 for pair in gen=d8m1kkz/blender-gen:latest caddy=caddy:2; do
 	service=${pair%%=*}

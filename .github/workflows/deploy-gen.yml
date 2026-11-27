@@ -1,22 +1,17 @@
-# Сборка образа gen и деплой gen и caddy на VPS Beget. Вся цепочка:
-#   1. На рабочем компьютере: git push в ветку dev.
-#   2. Здесь, на временной машине GitHub: сборка образа gen и отправка на Docker Hub.
-#   3. Только после этого: перенос коммитов из dev в main.
-#   4. Деплой: scripts/deploy.vps.beget.sh (вход на VPS, перезапуск контейнеров, ожидание ответа gen).
-# Ошибка на любом шаге отменяет следующие: при неудачной сборке main и VPS не меняются.
-# Всё в одном сценарии: push в main со стандартным токеном GitHub другие сценарии не запускает.
+# Сборка образа gen и деплой gen и caddy на VPS Beget — когда в main появляются новые коммиты.
+# Ошибка на любом шаге отменяет следующие.
 # Секреты (на GitHub: Settings → Secrets and variables → Actions):
 #   DOCKERHUB_TOKEN — токен Docker Hub пользователя d8m1kkz с правами Read & Write
-#   VPS_SSH_KEY     — закрытый ключ для входа на VPS, без пароля
+#   BEGET_SSH_KEY   — закрытый ключ для входа на VPS, без пароля
 name: Сборка и деплой gen
 
 on:
   push:
-    branches: [dev]
-  workflow_dispatch: # и вручную: вкладка Actions → Run workflow, ветка dev
+    branches: [main]
+  workflow_dispatch: # и вручную: вкладка Actions → Run workflow, ветка main
 
 permissions:
-  contents: write # нужно для переноса коммитов в main
+  contents: read
 
 # два запуска не идут одновременно: следующий ждёт окончания текущего
 concurrency:
@@ -24,22 +19,12 @@ concurrency:
 
 jobs:
   deploy:
-    if: github.ref == 'refs/heads/dev' # ручной запуск из другой ветки пропускается
+    if: github.ref == 'refs/heads/main' # ручной запуск из другой ветки пропускается
     runs-on: ubuntu-latest
     timeout-minutes: 30 # первая сборка, пока нет кэша, самая долгая
     steps:
       - name: Скачать репозиторий
         uses: actions/checkout@v5
-        with:
-          fetch-depth: 0 # вся история: нужна для проверки и переноса в main
-
-      # До сборки, чтобы не отправить на Docker Hub образ из коммита, который нельзя перенести в main
-      - name: В dev есть всё, что есть в main?
-        run: |
-          git merge-base --is-ancestor origin/main HEAD || {
-            echo "::error::В main есть коммиты, которых нет в dev. В ветке dev: git fetch, затем git merge origin/main"
-            exit 1
-          }
 
       # Машина GitHub каждый раз пустая, поэтому кэш сборки хранится на Docker Hub (тег buildcache).
       # --provenance=false: без сведений о запуске сборки, которые меняли бы образ при тех же слоях
@@ -54,18 +39,11 @@ jobs:
             --set "gen.cache-from=$cache" \
             --set "gen.cache-to=$cache,mode=max"
 
-      # Если коммиты уже перенесены вручную, git push ничего не делает и деплой продолжается
-      - name: Перенести коммиты в main
-        run: |
-          git push origin HEAD:main || {
-            echo "::error::main не обновлена. Если GitHub отказал из-за изменений в .github/workflows, выполните на своём компьютере git push origin dev:main и перезапустите этот запуск"
-            exit 1
-          }
-
       - name: Развернуть
         env:
-          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
-        run: | # ключ отдаётся ssh-agent и на диск не записывается
-          eval "$(ssh-agent -s)"
-          tr -d '\r' <<<"$VPS_SSH_KEY" | ssh-add -
+          BEGET_SSH_KEY: ${{ secrets.BEGET_SSH_KEY }}
+        run: | # ключ записывается в файл, который ждёт скрипт
+          mkdir -p ~/.ssh
+          tr -d '\r' <<<"$BEGET_SSH_KEY" > ~/.ssh/beget_root
+          chmod 600 ~/.ssh/beget_root   # иначе ssh откажется брать ключ
           scripts/deploy.vps.beget.sh

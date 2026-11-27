@@ -8,9 +8,9 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 // ── Константы ──
 
 // Журнал полученных моделей
-const MAX_HISTORY = 20
+const MAX_HISTORY = 15
 
-// Скорость автовращения: радиан за кадр (при 60 FPS ≈ 17°/с); знак — направление
+// Скорость автовращения: радиан за кадр (при 60 FPS ≈ 3,4°/с); знак — направление
 const ROTATION_SPEED = -0.001
 
 // Пауза перед повторным подключением к генератору, мс (пока Blender прогревается, gen не отвечает)
@@ -37,7 +37,7 @@ const BED_CELL = 25 // шаг сетки
 
 
 // Материал PETG: зелёный глянцевый пластик с лёгким лаковым слоем (блики от печати/самого пластика).
-// Один общий материал на все меши модели; цвет и шероховатость подбираются здесь.
+// Один общий материал на все меши модели; здесь начальный цвет (потом его задаёт gen) и шероховатость.
 const petgMaterial = new THREE.MeshPhysicalMaterial({
 	color: 0x29A546,
 	metalness: 0,
@@ -55,7 +55,7 @@ const ROOM_WALLS_LIGHTING = [
 	[0.7, '#2a2c32'],
 	[1, '#1d1e22'], // пол
 ]
-// В цвет карточек интерфейса (#1e2d44 → #16212f) — для видимого фона
+// Тёмно-синие тона интерфейса (#1e2d44 → #16212f) — для видимого фона
 const ROOM_WALLS_BACKGROUND = [
 	[0, '#34496a'], // потолок
 	[0.35, '#263753'],
@@ -69,18 +69,31 @@ const canvasContainer = ref(null)
 // null — значение неизвестно, пока gen не пришлёт первую модель (оно берётся из сцены Blender).
 const params = reactive({ x: null, y: null, z: null, thickness: null, excavation_height: null, perforation: null })
 // Допустимые значения параметров ({x: {min, max}, …}): задаёт Blender-воркер, gen присылает их вместе с моделью.
-// Своих копий диапазонов здесь нет. Пока не пришла первая модель, элементов управления нет.
+// Элементы управления появляются с первой моделью.
 const limits = ref(null)
-// Последнее допустимое значение каждого поля: к нему возвращаем, если ввод стёрли или он не число
-const lastValid = {}
-// Горизонтальные слайдеры; слайдер Z — отдельный, вертикальный
+// Слайдеры длины и ширины; слайдер Z — отдельный, вертикальный
 const TOP_SLIDERS = ['x', 'y']
-// Числовые поля. Подписи — только во всплывающей подсказке; step — шаг кнопок (у толщины дробные значения)
+// Остальные слайдеры.
+// geometric — шкала геометрическая: чем правее, тем быстрее растёт значение; точность — 0.1
 const NUMBER_CONTROLS = [
-	{ key: 'thickness', title: 'Толщина стенки, мм', step: 0.1 },
-	{ key: 'excavation_height', title: 'Высота выемки, мм', step: 1 },
-	{ key: 'perforation', title: 'Перфорация', step: 1 },
+	{ key: 'thickness', geometric: true },
+	{ key: 'excavation_height' },
+	{ key: 'perforation' },
 ]
+// Число положений кружка на геометрической шкале
+const GEOMETRIC_STEPS = 330
+// Названия слайдеров: подписи над ними и надпись на 3D-виде, пока слайдер двигают
+const SLIDER_NAMES = {
+	x: 'Длина',
+	y: 'Ширина',
+	z: 'Высота',
+	thickness: 'Стенка',
+	excavation_height: 'Выемка',
+	perforation: 'Перфорация',
+}
+// Параметр слайдера, который сейчас держат мышью или пальцем; null — никакой
+const dragged = ref(null)
+const stopDrag = () => (dragged.value = null)
 
 // turntable — «поворотный столик»: в нём стол принтера и модель, автовращение крутит его целиком
 let scene, camera, renderer, controls, turntable, bed, currentModel, light, resizeObserver
@@ -108,7 +121,6 @@ const applyView = (v) => {
 	}
 	// Камера: то же направление на цель, другая дистанция. Только если расстояние задали заново,
 	// иначе правка цвета и т. п. отменяла бы масштаб, выбранный пользователем.
-	// gen без distance_version: считаем заданным при каждой правке вида (version)
 	const version = v.distance_version ?? v.version
 	if (version !== distanceVersion) {
 		distanceVersion = version
@@ -118,7 +130,7 @@ const applyView = (v) => {
 	}
 }
 
-// Ориентация модели: повороты вокруг осей сцены (X — вдоль ширины, Y — вверх, Z — вдоль длины)
+// Ориентация модели: повороты вокруг осей сцены (X — вдоль длины, Y — вверх, Z — вдоль ширины)
 const orientModel = (model) => {
 	if (!viewState) return
 	const deg = THREE.MathUtils.degToRad
@@ -126,14 +138,14 @@ const orientModel = (model) => {
 }
 
 // ── Связь с генератором: WebSocket, одна общая корзина на всех клиентов ──
-// Сервер нумерует каждую правку любого клиента (version) и присылает модель вместе с x/y/z,
-// только если она актуальна: устаревшие (пока считали, пришла новая правка) не приходят вовсе.
+// Сервер нумерует каждую правку любого клиента (version) и присылает модель вместе с параметрами,
+// только если она актуальна.
 const connected = ref(false)
 // Выбран другой gen, и от него ещё нет ответа: на экране значения прежнего, поэтому их нельзя править.
 // Снимается моделью, ошибкой или неудачным подключением
 const switching = ref(false)
 let socket = null
-let stopped = false // компонент размонтирован — не переподключаемся
+let stopped = false // компонент размонтирован
 let pendingHeader = null // заголовок «model», ждущий своего бинарного кадра с GLB
 
 // Мои правки: локальный номер (seq) и подтверждения сервера (ack приносит seq и присвоенную version)
@@ -155,7 +167,7 @@ let nextEventId = 1
 const errorCount = ref(0)
 const reversedEvents = computed(() => [...events.value].reverse())
 
-// Длительность правки: от отправки до итога (модель или ошибка). Известна только для моих правок:
+// Длительность правки: от отправки до итога (модель или ошибка). Считается для моих правок:
 // время отправки хранится по seq, ack связывает seq с version, итог приходит по version.
 const sentAtBySeq = new Map() // seq → performance.now() в момент отправки
 const startedByVersion = new Map() // version → performance.now() отправки правки, породившей эту версию
@@ -170,7 +182,6 @@ const paramsShort = (header) =>
 	[['x', 'y', 'z'].map((k) => header[k]).join('×'), ...NUMBER_CONTROLS.map((c) => header[c.key])].join(' · ')
 
 // Все параметры модели из заголовка с именами (всплывающая подсказка): имена берём из пределов (limits), пока их нет — из params.
-// Сервер присылает все параметры (их значения читает из сцены Blender); проверка на undefined — только страховка.
 const paramsText = (header) =>
 	Object.keys(limits.value ?? params)
 		.filter((k) => header[k] !== undefined)
@@ -179,7 +190,7 @@ const paramsText = (header) =>
 
 const durationOf = (version) => {
 	const started = startedByVersion.get(version)
-	if (started === undefined) return '—' // правка другого клиента: времени отправки у нас нет
+	if (started === undefined) return '—' // правка другого клиента
 	startedByVersion.delete(version)
 	return formatDuration(performance.now() - started)
 }
@@ -194,9 +205,9 @@ const logError = (version, error) => {
 	logEvent({ version, status: 'error', error })
 }
 
-// Слои 3D-печати: процедурный рельеф в шейдере, без текстуры и UV.
+// Слои 3D-печати: процедурный рельеф в шейдере.
 // Высота «валика» слоя зависит только от мировой Y, поэтому полоски всегда горизонтальны.
-// Геометрия не меняется — отклоняется только нормаль (как у bump-карты), рельеф «рисует» свет.
+// Отклоняется только нормаль (как у bump-карты), рельеф «рисует» свет.
 const layerUniforms = {
 	uLayerHeight: { value: LAYER_HEIGHT },
 	uLayerDepth: { value: LAYER_DEPTH },
@@ -267,7 +278,7 @@ const prepareModel = (model) => {
 	})
 }
 
-// Освобождает геометрии убираемой модели (материал общий — его не трогаем)
+// Освобождает геометрии убираемой модели (материал общий)
 const disposeModel = (model) => {
 	model.traverse((o) => {
 		if (o.isMesh) o.geometry.dispose()
@@ -325,7 +336,7 @@ const showModel = async (header, buffer) => {
 	limits.value = header.limits
 	if (shouldApplyValues(header)) {
 		for (const key of Object.keys(params)) {
-			if (header[key] !== undefined) params[key] = lastValid[key] = header[key]
+			if (header[key] !== undefined) params[key] = header[key]
 		}
 	}
 	logEvent({ version: header.version, status: 'done', params: paramsShort(header), title: paramsText(header), size })
@@ -360,7 +371,7 @@ const onMessage = (data) => {
 
 // Серверы gen на выбор: список адресов отдаёт сайт (/gens, из GEN_ORIGINS — свой в каждом окружении).
 // Браузер подключается к выбранному gen напрямую (http→ws, https→wss): на странице по https адреса должны быть https
-// (иначе mixed content); в dev первый адрес — http://localhost:8080. Выбор помнит браузер (localStorage), у каждого свой.
+// (иначе mixed content). Выбор помнит браузер (localStorage), у каждого свой.
 const GEN_STORAGE_KEY = 'gen'
 const gens = ref([])
 const genIndex = ref(0)
@@ -442,28 +453,38 @@ const connect = () => {
 	}
 }
 
-// Применение правки поля. Событие change приходит при уходе из поля (потеря фокуса) или Enter, а не при наборе каждой цифры.
-// Число подгоняем под пределы и шаг, не число — возвращаем прежнее значение
-const commitNumber = (c) => {
-	const lim = limits.value?.[c.key]
-	const v = params[c.key]
-	if (!lim || typeof v !== 'number' || !Number.isFinite(v)) {
-		params[c.key] = lastValid[c.key]
-		return
-	}
-	const decimals = (String(c.step).split('.')[1] || '').length
-	const snapped = Math.round((v - lim.min) / c.step) * c.step + lim.min
-	const fixed = Number(Math.min(lim.max, Math.max(lim.min, snapped)).toFixed(decimals))
-	const changed = fixed !== lastValid[c.key]
-	params[c.key] = lastValid[c.key] = fixed
-	if (changed) sendParams()
+// Правый край слайдера. Выемка не может быть выше корзины, поэтому её край — текущий Z
+const sliderMax = (key) => (key === 'excavation_height' ? params.z : limits.value[key].max)
+
+// Положение кружка слайдера от 0 до 1: там же рисуется число
+const sliderPos = (key, geometric) => {
+	const { min } = limits.value[key]
+	const max = sliderMax(key)
+	const pos = geometric ? Math.log(params[key] / min) / Math.log(max / min) : (params[key] - min) / (max - min)
+	// Другой клиент мог задать выемку больше Z — кружок остаётся на краю
+	return Math.min(pos, 1)
 }
 
-// Кнопки «−» и «+» по бокам поля: сдвиг на шаг, дальше — как после ввода (пределы, шаг, отправка)
-const stepNumber = (c, dir) => {
-	const v = typeof params[c.key] === 'number' ? params[c.key] : lastValid[c.key]
-	params[c.key] = v + dir * c.step
-	commitNumber(c)
+// Движение слайдера (кроме Z и геометрического)
+const setValue = (key, value) => {
+	params[key] = Number(value)
+	sendParams()
+}
+
+// Движение слайдера Z: выемку, оказавшуюся выше, опускаем вместе с ним
+const changeZ = () => {
+	if (params.excavation_height > params.z) params.excavation_height = params.z
+	sendParams()
+}
+
+// Движение слайдера с геометрической шкалой: номер положения → значение с точностью 0.1
+const setGeometric = (key, step) => {
+	const { min, max } = limits.value[key]
+	const value = Math.round(min * (max / min) ** (step / GEOMETRIC_STEPS) * 10) / 10
+	// Соседние положения могут давать одно и то же значение — тогда отправлять нечего
+	if (value === params[key]) return
+	params[key] = value
+	sendParams()
 }
 
 // Отправляет правку слайдера в общую корзину
@@ -619,6 +640,8 @@ onBeforeUnmount(() => {
 	document.removeEventListener('fullscreenchange', syncFullscreen)
 	document.removeEventListener('webkitfullscreenchange', syncFullscreen)
 	document.removeEventListener('keydown', onKeydown)
+	window.removeEventListener('pointerup', stopDrag)
+	window.removeEventListener('pointercancel', stopDrag)
 	if (pseudoFullscreen) setPseudoFullscreen(false)
 })
 
@@ -627,6 +650,9 @@ onMounted(() => {
 	document.addEventListener('fullscreenchange', syncFullscreen)
 	document.addEventListener('webkitfullscreenchange', syncFullscreen)
 	document.addEventListener('keydown', onKeydown)
+	// Слайдер могут отпустить где угодно — слушаем всё окно
+	window.addEventListener('pointerup', stopDrag)
+	window.addEventListener('pointercancel', stopDrag)
 
 	const width = canvasContainer.value.clientWidth
 	const height = canvasContainer.value.clientHeight
@@ -634,7 +660,7 @@ onMounted(() => {
 	scene = new THREE.Scene()
 
 	camera = new THREE.PerspectiveCamera(15, width / height, 0.1, 10000)
-	camera.position.set(460, 460, 1125) // то же направление, расстояние ≈ 1300 мм (как distance по умолчанию)
+	camera.position.set(460, 460, 1125) // расстояние ≈ 1300 мм (как distance по умолчанию)
 	camera.lookAt(0, 0, 0)
 
 	renderer = new THREE.WebGLRenderer({ antialias: true })
@@ -654,7 +680,6 @@ onMounted(() => {
 	controls.enableDamping = true
 	controls.target.set(0, 0, 0)
 
-	// Базовое освещение сцены
 	// Тёплый основной свет: цветовой контраст с холодным «окном» делает освещение живее
 	light = new THREE.DirectionalLight(LIGHT_COLOR, LIGHT_INTENSITY)
 	// Свет и окружение закреплены в мире (как в комнате): при вращении вида освещение на модели меняется.
@@ -662,19 +687,19 @@ onMounted(() => {
 	camera.updateMatrixWorld()
 	const targetLocal = camera.worldToLocal(new THREE.Vector3(0, 0, 0))
 	// Свет падает почти от зрителя: луч отклонён от направления взгляда на LIGHT_ANGLE
-	// вправо и вверх (диагональ 45°). Меняйте LIGHT_ANGLE, чтобы сделать свет косее или прямее.
+	// вправо и вверх (диагональ 45°).
 	const dist = targetLocal.length()
 	const side = dist * Math.sin(LIGHT_ANGLE) * Math.SQRT1_2
 	light.position.copy(camera.localToWorld(new THREE.Vector3(side, side, targetLocal.z + dist * Math.cos(LIGHT_ANGLE))))
 	light.target.position.set(0, 0, 0)
 	scene.add(light, light.target)
 
-	// Карта окружения (IBL) — нарисованная «комната». Строится один раз, на кадры почти не влияет.
+	// Карта окружения (IBL) — нарисованная «комната».
 	scene.environment = makeRoomEnvironment()
 	scene.environmentIntensity = ENVIRONMENT_INTENSITY
 
-	// Фон — та же комната (окно и лампа на тех же местах), но в цветах карточек и размытая.
-	// Освещение при этом не меняется: для него используется нейтральная комната выше.
+	// Фон — та же комната (окно и лампа на тех же местах), но в тёмно-синих тонах и размытая.
+	// Для освещения — нейтральная комната выше.
 	scene.background = makeRoomEnvironment(ROOM_WALLS_BACKGROUND)
 	scene.backgroundBlurriness = 0.5
 	scene.backgroundIntensity = 0.75
@@ -721,81 +746,62 @@ onMounted(() => {
 
 <template>
 	<div class="layout">
-		<div class="viewer-wrapper">
-
-			<fieldset class="controls" :disabled="switching">
-				<template v-if="limits">
-					<!-- Две группы: если все элементы не помещаются в строку, числовые поля переносятся под X и Y -->
-					<div class="sliders">
-						<label v-for="key in TOP_SLIDERS" :key="key" class="slider">
-							<span>{{ key.toUpperCase() }}</span>
-							<input v-model.number="params[key]" type="range" :min="limits[key].min" :max="limits[key].max" step="1" @input="sendParams" />
-							<output>{{ params[key] }}</output>
-						</label>
+		<div v-if="limits" class="controls">
+			<!-- Две группы: если все слайдеры не помещаются в строку, вторая группа переносится под X и Y -->
+			<div class="sliders">
+				<label v-for="key in TOP_SLIDERS" :key="key" class="slider">
+					<small class="caption">{{ SLIDER_NAMES[key] }}</small>
+					<div class="range" :style="{ '--pos': sliderPos(key) }" @pointerdown="dragged = key">
+						<input v-model.number="params[key]" type="range" :min="limits[key].min" :max="limits[key].max" step="1" :disabled="switching" @input="sendParams" />
+						<output>{{ params[key] }}</output>
 					</div>
-					<div class="nums">
-						<div v-for="c in NUMBER_CONTROLS" :key="c.key" class="num" :title="c.title">
-							<button
-								type="button"
-								class="num-btn"
-								:aria-label="c.title + ': меньше'"
-								:disabled="!(params[c.key] > limits[c.key].min)"
-								@click="stepNumber(c, -1)"
-							>−</button>
-							<input
-								v-model.number="params[c.key]"
-								type="number"
-								:min="limits[c.key].min"
-								:max="limits[c.key].max"
-								:step="c.step"
-								:aria-label="c.title"
-								@change="commitNumber(c)"
-							/>
-							<button
-								type="button"
-								class="num-btn"
-								:aria-label="c.title + ': больше'"
-								:disabled="!(params[c.key] < limits[c.key].max)"
-								@click="stepNumber(c, 1)"
-							>+</button>
-						</div>
-					</div>
-				</template>
-			</fieldset>
-
-			<div class="viewer-row">
-				<label v-if="limits" class="slider-z">
-					<span>Z</span>
-					<input v-model.number="params.z" type="range" :min="limits.z.min" :max="limits.z.max" step="1" class="vertical" :disabled="switching" @input="sendParams" />
-					<output>{{ params.z }}</output>
 				</label>
-
-				<div ref="viewerArea" class="canvas-wrap" :class="{ 'is-fullscreen': isFullscreen }">
-					<div ref="canvasContainer" class="canvas-box"></div>
-					<div class="overlay" :class="{ active: isLoading || !connected }">
-						<div class="spinner"></div>
-						<div v-if="!connected">Подключение к генератору…</div>
-					</div>
-					<button
-						type="button"
-						class="fullscreen-toggle"
-						:title="fullscreenTitle"
-						:aria-label="fullscreenTitle"
-						@click="toggleFullscreen"
-					>
-						<!-- Развернуть: уголки наружу; свернуть: уголки внутрь -->
-						<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-							<path :d="isFullscreen ? 'M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5' : 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5'" />
-						</svg>
-					</button>
-				</div>
 			</div>
+			<div class="nums">
+				<label v-for="c in NUMBER_CONTROLS" :key="c.key" class="slider">
+					<small class="caption">{{ SLIDER_NAMES[c.key] }}</small>
+					<div class="range" :style="{ '--pos': sliderPos(c.key, c.geometric) }" @pointerdown="dragged = c.key">
+						<input v-if="c.geometric" type="range" min="0" :max="GEOMETRIC_STEPS" :value="Math.round(sliderPos(c.key, true) * GEOMETRIC_STEPS)" :disabled="switching" @input="setGeometric(c.key, $event.target.value)" />
+						<input v-else type="range" :min="limits[c.key].min" :max="sliderMax(c.key)" step="1" :value="params[c.key]" :disabled="switching" @input="setValue(c.key, $event.target.value)" />
+						<output>{{ params[c.key] }}</output>
+					</div>
+				</label>
+			</div>
+		</div>
+
+		<label v-if="limits" class="slider-z">
+			<small class="caption">{{ SLIDER_NAMES.z }}</small>
+			<div class="range" :style="{ '--pos': sliderPos('z') }" @pointerdown="dragged = 'z'">
+				<input v-model.number="params.z" type="range" :min="limits.z.min" :max="limits.z.max" step="1" class="vertical" :disabled="switching" @input="changeZ" />
+				<output>{{ params.z }}</output>
+			</div>
+		</label>
+
+		<div ref="viewerArea" class="canvas-wrap" :class="{ 'is-fullscreen': isFullscreen }">
+			<div ref="canvasContainer" class="canvas-box"></div>
+			<div class="overlay" :class="{ active: isLoading || !connected }">
+				<div class="spinner"></div>
+				<div v-if="!connected">Подключение к генератору…</div>
+			</div>
+			<div v-if="dragged" class="drag-hint">{{ SLIDER_NAMES[dragged] }} <span>{{ params[dragged] }}</span>{{ dragged === 'perforation' ? '' : ' мм' }}</div>
+			<button
+				type="button"
+				class="fullscreen-toggle"
+				:title="fullscreenTitle"
+				:aria-label="fullscreenTitle"
+				@click="toggleFullscreen"
+			>
+				<!-- Развернуть: уголки наружу; свернуть: уголки внутрь -->
+				<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<path :d="isFullscreen ? 'M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5' : 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5'" />
+				</svg>
+			</button>
 		</div>
 
 		<aside class="queue-panel">
 
-			<div class="queue-summary">
-				<span v-if="errorCount" class="stat error">Ошибок: {{ errorCount }}</span>
+			<div v-if="errorCount" class="queue-summary">
+				<span class="stat error">Ошибок: {{ errorCount }}</span>
 			</div>
 
 			<ul class="queue-list">
@@ -842,37 +848,23 @@ onMounted(() => {
 .gen-select option {
 	color: #000;
 }
+/* Широкий экран: слева ползунки, под ними Z и 3D-вид; справа журнал на всю высоту */
 .layout {
-	display: flex;
-	align-items: stretch;
-	gap: 24px;
+	display: grid;
+	grid-template-columns: auto minmax(0, 1fr) clamp(240px, 24vw, 320px);
+	grid-template-rows: auto 1fr;
+	gap: 12px;
 	width: 100%;
-}
-/* Общий вид двух карточек: вьювер и журнал */
-.queue-panel,
-.viewer-wrapper {
-	box-sizing: border-box;
-	border-radius: 20px;
-	background: linear-gradient(160deg, #1e2d44 0%, #16212f 100%);
-	border: 1px solid rgba(148, 197, 255, 0.15);
-	box-shadow: 0 30px 60px -20px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(0, 0, 0, 0.3);
 	color: #e6edf6;
 }
-/* Общая подложка блоков с ползунками */
-.controls,
-label.slider-z {
-	border-radius: 14px;
-	background: rgba(255, 255, 255, 0.04);
-	border: 1px solid rgba(255, 255, 255, 0.08);
-}
 .queue-panel {
+	grid-column: 3;
+	grid-row: 1 / 3;
 	display: flex;
 	flex-direction: column;
 	gap: 12px;
-	flex: 0 0 clamp(240px, 24vw, 320px);
 	min-height: 0;
-	contain: size; /* высоту задаёт вьювер, а не длина списка */
-	padding: 24px 18px;
+	contain: size; /* высоту задают ползунки и 3D-вид */
 }
 .queue-summary {
 	display: flex;
@@ -898,7 +890,7 @@ label.slider-z {
 	gap: 8px;
 }
 .job {
-	padding: 8px 10px;
+	padding: 4px 10px;
 	border-radius: 10px;
 	background: rgba(255, 255, 255, 0.04);
 	border: 1px solid rgba(255, 255, 255, 0.08);
@@ -909,13 +901,14 @@ label.slider-z {
 .job.error { border-left-color: #f87171; }
 .job-row {
 	display: flex;
+	min-height: 20px; /* запись высотой 30px — как кружок ползунка: они в одном ряду */
 	align-items: center;
 	gap: 8px;
 	white-space: nowrap;
 }
 .job-params {
 	flex: 1;
-	min-width: 0; /* в узкой панели обрезается многоточием, а не переносится */
+	min-width: 0; /* в узкой панели обрезается многоточием */
 	overflow: hidden;
 	text-overflow: ellipsis;
 	font-variant-numeric: tabular-nums;
@@ -946,22 +939,13 @@ label.slider-z {
 	text-align: center;
 	padding: 12px 0;
 }
-.viewer-wrapper {
-	display: flex;
-	flex-direction: column;
-	gap: 16px;
-	flex: 1 1 0;
-	min-width: 0;
-	padding: clamp(12px, 2vw, 24px);
-}
 .controls {
+	grid-column: 1 / 3;
+	grid-row: 1;
 	display: flex;
 	flex-wrap: wrap;
 	gap: 12px 16px;
 	align-items: center;
-	padding: 12px 14px;
-	margin: 0; /* это fieldset: убираем родные отступы и даём сжиматься */
-	min-width: 0;
 }
 label {
 	display: flex;
@@ -971,109 +955,96 @@ label {
 	font-weight: 600;
 	color: #94a9c4;
 }
-label span {
-	display: inline-flex;
-	width: 24px;
-	height: 24px;
-	align-items: center;
-	justify-content: center;
-	border-radius: 6px;
-	background: rgba(125, 211, 252, 0.12);
-	color: #7dd3fc;
-}
-/* Ширина строки меньше «340px + числовые поля» — поля переносятся на вторую строку.
-   Большой flex-grow: пока всё в одной строке, свободное место достаётся ползункам */
-.sliders {
-	display: flex;
-	flex: 999 1 340px;
-	gap: 16px;
-	min-width: 0;
-}
+/* Обе группы занимают по половине строки: X и Y — одну, три остальных слайдера — другую.
+   Ширина строки меньше «330px + 330px» — вторая группа переносится на новую строку */
+.sliders,
 .nums {
 	display: flex;
-	flex: 1 1 auto;
-	justify-content: space-between;
+	flex: 1 1 330px;
 	gap: 16px;
 	min-width: 0;
 }
+/* Подпись над слайдером: занимает всю строку, слайдер переносится под неё */
+.caption {
+	flex-basis: 100%;
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+	font-size: 14px;
+	font-weight: 700;
+	line-height: 16px;
+}
 label.slider {
-	flex: 1 1 0; /* X и Y делят строку поровну */
+	flex-wrap: wrap;
+	row-gap: 2px;
+	flex: 1 1 0; /* слайдеры группы делят строку поровну */
+	min-width: 0;
+}
+/* Ползунок с числом внутри кружка. --pos (от 0 до 1) — положение кружка */
+.range {
+	--thumb: 30px;
+	--track: 6px;
+	position: relative;
+	display: flex;
+	flex: 1;
 	min-width: 0;
 }
 input[type='range'] {
 	flex: 1;
 	min-width: 0;
+	height: var(--thumb);
+	margin: 0;
 	padding: 0;
 	border: none;
 	background: transparent;
-	accent-color: #7dd3fc;
+	outline: none;
+	appearance: none;
+	-webkit-appearance: none;
 	cursor: pointer;
 }
-input[type='range']:focus {
-	box-shadow: none;
+input[type='range']::-webkit-slider-runnable-track {
+	height: var(--track);
+	border-radius: 999px;
+	background: linear-gradient(to right, #7dd3fc calc(var(--pos) * 100%), rgba(255, 255, 255, 0.15) 0);
 }
-.num {
-	display: flex;
-	align-items: center;
-	gap: 4px;
-	min-width: 0; /* на узком экране сжимается поле ввода */
-}
-.num input {
-	width: 56px;
-	min-width: 0;
-	text-align: center;
-	appearance: textfield; /* родные стрелки справа скрыты: вместо них кнопки по бокам */
-	-moz-appearance: textfield;
-}
-.num input::-webkit-inner-spin-button,
-.num input::-webkit-outer-spin-button {
+input[type='range']::-webkit-slider-thumb {
 	-webkit-appearance: none;
-	margin: 0;
+	width: var(--thumb);
+	height: var(--thumb);
+	margin-top: calc((var(--track) - var(--thumb)) / 2);
+	border: none;
+	border-radius: 50%;
+	background: #7dd3fc;
 }
-.num-btn {
-	flex: none;
-	width: 28px;
-	height: 32px;
-	padding: 0;
-	border-radius: 8px;
-	background: rgba(255, 255, 255, 0.08);
-	box-shadow: none;
-	color: #7dd3fc;
-	font-size: 1.1rem;
-	line-height: 1;
+input[type='range']::-moz-range-track {
+	height: var(--track);
+	border-radius: 999px;
+	background: rgba(255, 255, 255, 0.15);
 }
-.num-btn:hover:not(:disabled) {
-	background: rgba(125, 211, 252, 0.2);
-	filter: none;
-	transform: none;
+input[type='range']::-moz-range-progress {
+	height: var(--track);
+	border-radius: 999px;
+	background: #7dd3fc;
 }
-.num-btn:active:not(:disabled) {
-	transform: none;
+input[type='range']::-moz-range-thumb {
+	width: var(--thumb);
+	height: var(--thumb);
+	border: none;
+	border-radius: 50%;
+	background: #7dd3fc;
 }
-.num-btn:disabled {
-	opacity: 0.35;
-	cursor: default;
-}
+/* Число лежит поверх кружка; мышь и палец проходят сквозь него */
 output {
-	width: 3ch;
-	text-align: right;
-	color: #e6edf6;
+	position: absolute;
+	top: 50%;
+	left: calc(var(--thumb) / 2 + (100% - var(--thumb)) * var(--pos));
+	transform: translate(-50%, -50%);
+	pointer-events: none;
+	color: #0f1724;
+	font-size: 0.75rem;
+	font-weight: 700;
 	font-variant-numeric: tabular-nums;
-}
-input {
-	width: 70px;
-	padding: 6px 8px;
-	border-radius: 8px;
-	border: 1px solid rgba(255, 255, 255, 0.12);
-	background: #0f1724;
-	color: #e6edf6;
-	font: inherit;
-	outline: none;
-	transition: border-color 0.15s, box-shadow 0.15s;
-}
-input:focus {
-	border-color: #7dd3fc;
-	box-shadow: 0 0 0 3px rgba(125, 211, 252, 0.2);
 }
 input:disabled {
 	opacity: 0.35;
@@ -1107,28 +1078,51 @@ button:active {
 	box-shadow: inset 0 0 40px rgba(0, 0, 0, 0.5);
 }
 .canvas-wrap {
+	grid-column: 2;
+	grid-row: 2;
 	position: relative;
-	flex: 1;
 	min-width: 0;
 }
-.viewer-row {
-	display: flex;
-	align-items: stretch;
-	gap: 12px;
-}
 label.slider-z {
+	grid-column: 1;
+	grid-row: 2;
 	flex-direction: column;
 	width: auto;
-	padding: 12px 6px;
 }
 input[type='range'].vertical {
 	writing-mode: vertical-lr;
 	direction: rtl; /* большее значение сверху */
-	width: auto;
-	height: 100%;
+	flex: none;
+	width: var(--thumb);
+	height: auto;
+}
+input[type='range'].vertical::-webkit-slider-runnable-track {
+	width: var(--track);
+	height: auto;
+	background: linear-gradient(to top, #7dd3fc calc(var(--pos) * 100%), rgba(255, 255, 255, 0.15) 0);
+}
+input[type='range'].vertical::-webkit-slider-thumb {
+	margin-top: 0;
+	margin-left: calc((var(--track) - var(--thumb)) / 2);
+}
+input[type='range'].vertical::-moz-range-track,
+input[type='range'].vertical::-moz-range-progress {
+	width: var(--track);
+}
+input[type='range'].vertical::-moz-range-track {
+	height: 100%; /* иначе остаётся высота горизонтальной дорожки, и вертикальную не видно */
+}
+/* У вертикального Z подпись тоже вертикальная, читается снизу вверх */
+label.slider-z .caption {
+	flex-basis: auto;
+	writing-mode: vertical-rl;
+	transform: rotate(180deg);
 }
 label.slider-z output {
-	text-align: center;
+	top: auto;
+	bottom: calc(var(--thumb) / 2 + (100% - var(--thumb)) * var(--pos));
+	left: 50%;
+	transform: translate(-50%, 50%);
 }
 /* Полноэкранный режим: и для Fullscreen API, и для псевдо-режима (position: fixed на всё окно) */
 .canvas-wrap.is-fullscreen {
@@ -1186,6 +1180,25 @@ button.fullscreen-toggle {
 	opacity: 1;
 	pointer-events: auto;
 }
+/* Название и значение слайдера, который сейчас двигают. Тень — чтобы текст читался на любом фоне */
+.drag-hint {
+	position: absolute;
+	right: 12px;
+	bottom: 10px;
+	z-index: 2; /* поверх затемнения со спиннером */
+	pointer-events: none;
+	font-size: 1rem;
+	font-weight: 600;
+	color: #e6edf6;
+	text-shadow: 0 0 2px #000, 0 0 3px #000, 0 0 6px #000;
+}
+/* Место под число: самое длинное значение — 3 знака («256», «9.9»), надпись не сдвигается */
+.drag-hint span {
+	display: inline-block;
+	min-width: 3ch;
+	text-align: right; /* число прижато к «мм» */
+	font-variant-numeric: tabular-nums;
+}
 .spinner {
 	width: 44px;
 	height: 44px;
@@ -1200,66 +1213,48 @@ button.fullscreen-toggle {
 .canvas-box :deep(canvas) {
 	display: block;
 }
+/* Широкий экран: страница занимает всю высоту окна, 3D-вид — всё место под ползунками */
+@media (min-width: 901px) {
+	.layout {
+		min-height: calc(100vh - 16px); /* 16px — отступы #app в welcome.blade.php */
+		min-height: calc(100svh - 16px);
+	}
+	/* Первая запись журнала — в одном ряду со слайдерами, ниже их подписей (16px + 2px) */
+	.queue-panel {
+		padding-top: 18px;
+	}
+	.canvas-wrap {
+		min-height: 280px;
+	}
+	.canvas-box {
+		position: absolute; /* размер задаёт окно, а не нарисованный внутри canvas */
+		inset: 0;
+		height: auto;
+	}
+}
+/* Узкий экран: журнал переходит вниз */
 @media (max-width: 900px) {
 	.layout {
-		flex-direction: column;
+		grid-template-columns: auto minmax(0, 1fr);
+		grid-template-rows: auto;
 	}
 	.queue-panel {
-		width: auto;
+		grid-column: 1 / 3;
+		grid-row: 3;
 		height: 280px;
-		flex: none;
 	}
 }
 /* Телефоны: меньше отступы, чтобы больше места досталось элементам управления и модели */
 @media (max-width: 600px) {
 	.layout {
-		gap: 12px;
-	}
-	.viewer-wrapper {
-		gap: 10px;
-		padding: 8px;
+		gap: 8px;
 	}
 	.controls {
 		gap: 10px;
-		padding: 8px;
 	}
-	.sliders {
+	.sliders,
+	.nums {
 		gap: 12px;
-	}
-	.sliders label {
-		gap: 6px;
-	}
-	.nums {
-		gap: 8px;
-	}
-	.num {
-		gap: 2px;
-	}
-	.num-btn {
-		width: 26px;
-		height: 36px;
-	}
-	.num input {
-		padding: 6px 0;
-		font-size: 16px; /* при меньшем шрифте iPhone увеличивает страницу при вводе */
-	}
-	.viewer-row {
-		gap: 8px;
-	}
-	label.slider-z {
-		padding: 8px 2px;
-	}
-	.queue-panel {
-		padding: 14px 12px;
-	}
-}
-/* Самые узкие телефоны: иначе значение в числовом поле не помещается */
-@media (max-width: 360px) {
-	.nums {
-		gap: 6px;
-	}
-	.num-btn {
-		width: 24px;
 	}
 }
 /* Вертикальный экран: оставляем снизу полосу, за которую можно прокрутить страницу (жесты на модели её не прокручивают) */
