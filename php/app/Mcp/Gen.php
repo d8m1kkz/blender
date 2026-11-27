@@ -21,7 +21,7 @@ class Gen
 	private static array $limits = [];
 
 	/**
-	 * Адрес gen для сервера (не для браузера): GEN_URL, иначе первый из GEN_ORIGINS.
+	 * Адрес gen для сервера: GEN_URL, иначе первый из GEN_ORIGINS.
 	 * В Docker GEN_ORIGINS указывает на localhost:8080 хоста — изнутри контейнера php он недоступен.
 	 */
 	public static function url(): string
@@ -48,7 +48,7 @@ class Gen
 		}
 	}
 
-	/** Текущие значения {version, x, y, …} или {version, spin, distance, …} без пересчёта модели. */
+	/** Текущие значения {version, x, y, …} или {version, spin, distance, …}. */
 	public static function params(bool $view = false): array
 	{
 		return self::send('get', $view ? '/view' : '/params')->json();

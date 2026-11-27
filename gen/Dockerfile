@@ -58,6 +58,6 @@ WORKDIR /app
 
 COPY basket.blend web.py worker.py ./
 
-# Порт берём из $PORT (его задаёт Render, по умолчанию 10000); локально и в compose — 8080.
+# Порт берём из $PORT, по умолчанию — 8080.
 # Shell-форма + exec: нужна подстановка переменной, а uvicorn должен остаться PID 1 и получать SIGTERM
 CMD exec uvicorn web:app --host 0.0.0.0 --port ${PORT:-8080}

@@ -1,5 +1,5 @@
 # Сервер gen на VPS под HTTPS: https://<IP через дефисы>.sslip.io (например, https://1-2-3-4.sslip.io).
-# На VPS нужны два файла: этот и compose_gen.yml (описание gen). Caddyfile не нужен. Сайт (php) живёт отдельно.
+# На VPS нужны два файла: этот и compose_gen.yml (описание gen).
 # Деплой с рабочей машины — копирует файлы, пишет SITE_HOST в .env и запускает:
 #   VPS Beget: scripts/deploy.vps.beget.sh [домен];  VPS immers: scripts/deploy.vps.immers.sh [IP] [домен]
 # Запуск прямо на VPS (SITE_HOST можно один раз записать в файл .env рядом с этим файлом):

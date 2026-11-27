@@ -10,11 +10,11 @@ worker = None
 
 # ── Общая корзина: одно состояние на всех клиентов (живёт в памяти процесса) ──
 # state — желаемые параметры: последняя правка любого клиента; version растёт с каждой правкой.
-# Стартуем с version=1 и дефолтами клиента, чтобы модель была готова к первому подключению.
+# Стартуем с version=1 и размерами по умолчанию, чтобы модель была готова к первому подключению.
 state = {"version": 1, "x": 100.0, "y": 100.0, "z": 50.0}
 # Правка может прийти частичной; что ещё никто не задавал, в state нет — Blender берёт своё из basket.blend.
-# view — общий «вид»: цвет, камера, ориентация модели, свет. Blender не нужен, поэтому правка
-# рассылается сразу; свой version, независимый от version корзины. Дефолты совпадают с клиентом.
+# view — общий «вид»: цвет, камера, ориентация модели, свет. Правка
+# рассылается сразу; свой version, независимый от version корзины.
 VIEW_DEFAULTS = {
 	"color": "#29a546",          # цвет пластика модели
 	"distance": 1300.0,          # расстояние от камеры до центра стола, мм (модель 100×100 целиком влезает и в узкий экран телефона)
@@ -25,7 +25,7 @@ VIEW_DEFAULTS = {
 }
 
 # distance_version — version правки, в которой расстояние задавали последний раз. Пользователь меняет масштаб
-# у себя в браузере, поэтому клиент берёт distance, только когда это число изменилось (а не при смене цвета и т. п.).
+# у себя в браузере, поэтому клиент берёт distance, только когда это число изменилось.
 view = {"version": 1, "distance_version": 1, **VIEW_DEFAULTS}
 VIEW_RANGES = {
 	"distance": (50, 5000),
@@ -36,8 +36,8 @@ VIEW_RANGES = {
 VIEW_COLORS = ("color", "light_color")
 # Сколько секунд ждём, пока клиент примет одно сообщение; дольше — отключаем (зависший клиент не должен держать сервер)
 SEND_TIMEOUT = float(os.environ.get("SEND_TIMEOUT", "20"))
-# Параметры модели {имя: {"min", "max"}}: задаются только в PARAMS у worker.py, сюда приходят после каждого
-# запуска воркера (load_limits). Ключи — это и есть список параметров, своего списка у web.py нет.
+# Параметры модели {имя: {"min", "max"}}: задаются в PARAMS у worker.py, сюда приходят после каждого
+# запуска воркера (load_limits). Ключи — это и есть список параметров.
 # Правки вне диапазона отбрасываются; веб-клиент получает пределы в сообщении «model», остальные — через GET /limits.
 limits: dict = {}
 ready = None       # последняя опубликованная (актуальная) модель: {version, <параметры из Blender>, glb}
@@ -48,7 +48,7 @@ changed = asyncio.Condition()
 
 
 def pick_params(source: dict) -> dict:
-	"""Только параметры модели из source (без version, glb и прочего); отсутствующие пропускаются."""
+	"""Только параметры модели из source; отсутствующие пропускаются."""
 	return {k: source[k] for k in limits if k in source}
 
 
@@ -158,7 +158,7 @@ async def generation_loop():
 		blender_params.clear()
 		blender_params.update(pick_params({**(ready or {}), **snap}))
 
-		# Blender считает до конца, не прерываем; правки тем временем копятся в state
+		# Пока Blender считает, правки копятся в state
 		try:
 			(glb, values), error = await render(snap), None
 		except Exception as e:
@@ -181,7 +181,7 @@ async def generation_loop():
 			changed.notify_all()
 
 
-# ── Замер запаса памяти (cgroup v2, как на Render) ──
+# ── Замер запаса памяти (cgroup v2) ──
 # Фоновая задача ищет наименьший запас памяти и запоминает строкой: запас и параметры корзины.
 # Занятой считаем только память, которую нельзя освободить: процессы, /dev/shm и нужды ядра. Файловый кэш не считаем:
 # ядро заполняет им свободное место и освобождает по требованию, поэтому memory.peak доходит до лимита и без нехватки.
@@ -203,7 +203,7 @@ def read_used_mb() -> float:
 	return sum(int(stat[key]) for key in ("anon", "shmem", "kernel")) / 1048576
 
 
-# Лимит не меняется, читаем один раз. «max» — без лимита (как локально): тогда берём 512, как на Render
+# Лимит не меняется, читаем один раз. «max» — без лимита (как локально): тогда берём 512
 _max = read_cgroup("memory.max")
 MEM_LIMIT = 512 if _max == "max" else int(_max) / 1048576
 
@@ -214,7 +214,7 @@ def sample_memory():
 		params = " ".join(f"{k}={v:g}" for k, v in blender_params.items()) or "старт, до первой генерации"
 		mem_min["free"] = free
 		mem_min["line"] = f"RAM мин. запас {free:.1f} МБ: {params}"
-		print(mem_min["line"], flush=True)  # в лог Render: память процесса не переживёт перезапуск
+		print(mem_min["line"], flush=True)  # в лог: после перезапуска значение в памяти процесса пропадает
 
 
 async def memory_sampler(interval: float):
@@ -250,7 +250,7 @@ app.add_middleware(
 def parse_view(msg: dict) -> dict:
 	"""Частичная правка вида: проверяет поля, ValueError — если что-то неверно или полей нет.
 
-	reset: true — вернуть всё к умолчаниям (остальные поля сообщения тогда не смотрим).
+	reset: true — вернуть всё к умолчаниям.
 	"""
 	if msg.get("reset") is True:
 		return dict(VIEW_DEFAULTS)
@@ -367,7 +367,7 @@ async def ws_endpoint(ws: WebSocket):
 				else:
 					continue
 			except (ValueError, KeyError, TypeError, AttributeError):
-				continue  # битое сообщение пропускаем, соединение не рвём
+				continue  # битое сообщение пропускаем
 			async with changed:
 				if kind == "view":
 					update_view(patch)
@@ -396,7 +396,7 @@ PARAMS_WAIT = float(os.environ.get("PARAMS_WAIT", "20"))
 
 @app.get("/params")
 async def get_params():
-	"""Текущие значения параметров модели — у последней готовой модели; Blender не вызывается."""
+	"""Текущие значения параметров модели — у последней готовой модели."""
 	if ready is None:
 		raise HTTPException(503, "модель ещё не готова")
 	return {"version": ready["version"], **pick_params(ready)}
@@ -448,7 +448,7 @@ async def get_view():
 
 @app.post("/view")
 async def post_view(patch: dict):
-	"""Частичная правка общего вида (как сообщение view по WebSocket). Blender не нужен:
+	"""Частичная правка общего вида (как сообщение view по WebSocket):
 	правка сразу рассылается всем клиентам, ответ — общий вид после неё."""
 	try:
 		patch = parse_view(patch)

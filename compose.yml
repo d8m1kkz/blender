@@ -1,5 +1,4 @@
 # Основной файл — PRODUCTION без HTTPS (всё на одной машине, доступ по http://<IP>).
-# Скрипты scripts/deploy.vps.*.sh его не используют: на VPS едет compose.vps.yml (только gen и caddy).
 # Вариант с caddy и HTTPS (sslip.io) лежит в запасе: compose.caddy.yml накладывается поверх этого файла.
 # Для разработки рядом лежит compose.override.yml: `docker compose up` подхватывает его сам и накладывает отличия.
 # Явно production (без override): `docker compose -f compose.yml ...`
@@ -17,7 +16,6 @@ x-logging: &default-logging
 
 services:
   # nginx: раздаёт статику и передаёт PHP-запросы в php (см. nginx/nginx.conf). Единственный вход снаружи (порт 80):
-  # страница и список адресов gen (/gens) — отсюда; к gen браузер подключается напрямую.
   nginx:
     image: d8m1kkz/blender-nginx:latest
     build:
@@ -31,16 +29,17 @@ services:
     depends_on:
       - php
 
-  # php-fpm с кодом Laravel внутри образа. Порты наружу не публикуются: к нему обращается только nginx.
+  # php-fpm с кодом Laravel внутри образа: к нему обращается только nginx.
   php:
     image: d8m1kkz/blender-php:latest
     build:
       context: ./php
       target: app
     env_file:
-      - ./php/.env.beget # настройки Laravel (APP_ENV, APP_KEY…, GEN_ORIGINS) для production
+      - ./php/.env.beget # настройки Laravel (APP_ENV, GEN_ORIGINS…) для production
+      - ./php/.env.beget.key # APP_KEY (секрет, в git его нет)
     environment:
-      - GEN_URL=http://gen:8080 # адрес gen для MCP (<сайт>/mcp): запросы идут из контейнера php, а не из браузера
+      - GEN_URL=http://gen:8080 # адрес gen для MCP (<сайт>/mcp): запросы идут из контейнера php
     volumes:
       - app-storage:/var/www/html/storage
     logging: *default-logging

@@ -1,0 +1,55 @@
+# Деплой сайта (php/) на хостинг Beget — когда в main появляются новые коммиты.
+# Ошибка на любом шаге отменяет следующие.
+# Секреты (на GitHub: Settings → Secrets and variables → Actions):
+#   BEGET_SSH_KEY — закрытый ключ для входа на хостинг, без пароля
+#   APP_KEY       — строка APP_KEY=… из php/.env.beget.key
+name: Деплой сайта
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # и вручную: вкладка Actions → Run workflow, ветка main
+
+permissions:
+  contents: read
+
+# два запуска не идут одновременно: следующий ждёт окончания текущего
+concurrency:
+  group: deploy-php
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main' # ручной запуск из другой ветки пропускается
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Скачать репозиторий
+        uses: actions/checkout@v5
+
+      - name: Установить Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22 # как в php/Dockerfile
+
+      # Скрипт деплоя только запускает сборку, пакеты для неё ставятся здесь
+      - name: Установить пакеты для сборки JS и CSS
+        run: npm ci
+        working-directory: php
+
+      - name: Развернуть
+        env:
+          BEGET_SSH_KEY: ${{ secrets.BEGET_SSH_KEY }}
+          APP_KEY: ${{ secrets.APP_KEY }}
+        run: | # ключи записываются в файлы, а имя beget — в настройки ssh: всё это ждёт скрипт
+          mkdir -p ~/.ssh
+          tr -d '\r' <<<"$BEGET_SSH_KEY" > ~/.ssh/beget_root
+          chmod 600 ~/.ssh/beget_root   # иначе ssh откажется брать ключ
+          cat > ~/.ssh/config <<'EOF'
+          Host beget
+            HostName d8m1k.beget.tech
+            User d8m1k_root
+            IdentityFile ~/.ssh/beget_root
+            StrictHostKeyChecking accept-new
+          EOF
+          tr -d '\r' <<<"$APP_KEY" > php/.env.beget.key
+          scripts/deploy.beget.sh

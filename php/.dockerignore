@@ -9,6 +9,6 @@ public_html/build
 public_html/hot
 public_html/fonts-manifest.dev.json
 
-# Рабочие файлы Laravel: содержимое папок в образ не берём
+# Рабочие файлы Laravel
 storage/logs/*
 storage/framework/*/*
