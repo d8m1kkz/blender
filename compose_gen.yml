@@ -16,11 +16,6 @@ services:
     image: d8m1kkz/blender-gen:latest
     build:
       context: ./gen
-      # GEN_TREE — из какой версии папки gen собран образ (задаёт scripts/prepare.sh)
-      args:
-        GEN_TREE: ${GEN_TREE:-} # внутрь образа: GET /version
-      labels:
-        gen.tree: ${GEN_TREE:-} # в описание образа: проверяет deploy-gen.yml до деплоя
     environment:
       - PYTHONUNBUFFERED=1
     shm_size: '256mb'

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Деплой gen и caddy (compose.vps.yml) на VPS, идемпотентный.
-# Перед этим образ gen должен быть на Docker Hub: scripts/prepare.sh gen
+# Образ gen берётся с Docker Hub: туда его отправляет GitHub Actions (.github/workflows/deploy-gen.yml).
 # Если VPS не может скачать образ, он передаётся напрямую с этой машины (docker save | docker load).
 # Использование: scripts/deploy.vps.immers.sh [IP-адрес] [домен]
 set -euo pipefail

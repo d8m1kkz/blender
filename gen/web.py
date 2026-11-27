@@ -23,6 +23,7 @@ VIEW_DEFAULTS = {
 	"light_brightness": 1.0,     # множитель яркости всего освещения (1 — как по умолчанию)
 	"spin": -3.44,               # автовращение стола с моделью, градусы в секунду (0 — стоит)
 }
+
 # distance_version — version правки, в которой расстояние задавали последний раз. Пользователь меняет масштаб
 # у себя в браузере, поэтому клиент берёт distance, только когда это число изменилось (а не при смене цвета и т. п.).
 view = {"version": 1, "distance_version": 1, **VIEW_DEFAULTS}
@@ -457,13 +458,6 @@ async def post_view(patch: dict):
 		update_view(patch)
 		changed.notify_all()
 		return dict(view)
-
-
-@app.get("/version")
-async def get_version():
-	"""Из какой версии папки gen собран образ (git rev-parse HEAD:gen).
-	Пусто, если образ собран не через scripts/prepare.sh или с незакоммиченными изменениями."""
-	return {"gen_tree": os.environ.get("GEN_TREE", "")}
 
 
 @app.get("/memory")

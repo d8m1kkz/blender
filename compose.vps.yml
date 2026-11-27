@@ -4,7 +4,7 @@
 #   VPS Beget: scripts/deploy.vps.beget.sh [домен];  VPS immers: scripts/deploy.vps.immers.sh [IP] [домен]
 # Запуск прямо на VPS (SITE_HOST можно один раз записать в файл .env рядом с этим файлом):
 #   SITE_HOST=1-2-3-4.sslip.io docker compose -f compose.vps.yml up -d
-# Образ gen берётся с Docker Hub (отправить туда: scripts/prepare.sh gen).
+# Образ gen берётся с Docker Hub: туда его собирает и отправляет GitHub Actions (.github/workflows/deploy-gen.yml).
 
 include:
   - compose_gen.yml
