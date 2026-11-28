@@ -74,11 +74,12 @@ const limits = ref(null)
 // Слайдеры длины и ширины; слайдер Z — отдельный, вертикальный
 const TOP_SLIDERS = ['x', 'y']
 // Остальные слайдеры.
-// geometric — шкала геометрическая: чем правее, тем быстрее растёт значение; точность — 0.1
+// geometric — шкала геометрическая: чем правее, тем быстрее растёт значение;
+// decimals — сколько знаков после запятой у значения на такой шкале
 const NUMBER_CONTROLS = [
-	{ key: 'thickness', geometric: true },
+	{ key: 'thickness', geometric: true, decimals: 1 },
 	{ key: 'excavation_height' },
-	{ key: 'perforation' },
+	{ key: 'perforation', geometric: true, decimals: 0 },
 ]
 // Число положений кружка на геометрической шкале
 const GEOMETRIC_STEPS = 330
@@ -477,10 +478,11 @@ const changeZ = () => {
 	sendParams()
 }
 
-// Движение слайдера с геометрической шкалой: номер положения → значение с точностью 0.1
-const setGeometric = (key, step) => {
+// Движение слайдера с геометрической шкалой: номер положения → значение с точностью decimals знаков
+const setGeometric = ({ key, decimals }, step) => {
 	const { min, max } = limits.value[key]
-	const value = Math.round(min * (max / min) ** (step / GEOMETRIC_STEPS) * 10) / 10
+	const factor = 10 ** decimals
+	const value = Math.round(min * (max / min) ** (step / GEOMETRIC_STEPS) * factor) / factor
 	// Соседние положения могут давать одно и то же значение — тогда отправлять нечего
 	if (value === params[key]) return
 	params[key] = value
@@ -659,7 +661,7 @@ onMounted(() => {
 
 	scene = new THREE.Scene()
 
-	camera = new THREE.PerspectiveCamera(15, width / height, 0.1, 10000)
+	camera = new THREE.PerspectiveCamera(15, width / height, 10, 10000)
 	camera.position.set(460, 460, 1125) // расстояние ≈ 1300 мм (как distance по умолчанию)
 	camera.lookAt(0, 0, 0)
 
@@ -761,7 +763,7 @@ onMounted(() => {
 				<label v-for="c in NUMBER_CONTROLS" :key="c.key" class="slider">
 					<small class="caption">{{ SLIDER_NAMES[c.key] }}</small>
 					<div class="range" :style="{ '--pos': sliderPos(c.key, c.geometric) }" @pointerdown="dragged = c.key">
-						<input v-if="c.geometric" type="range" min="0" :max="GEOMETRIC_STEPS" :value="Math.round(sliderPos(c.key, true) * GEOMETRIC_STEPS)" :disabled="switching" @input="setGeometric(c.key, $event.target.value)" />
+						<input v-if="c.geometric" type="range" min="0" :max="GEOMETRIC_STEPS" :value="Math.round(sliderPos(c.key, true) * GEOMETRIC_STEPS)" :disabled="switching" @input="setGeometric(c, $event.target.value)" />
 						<input v-else type="range" :min="limits[c.key].min" :max="sliderMax(c.key)" step="1" :value="params[c.key]" :disabled="switching" @input="setValue(c.key, $event.target.value)" />
 						<output>{{ params[c.key] }}</output>
 					</div>
