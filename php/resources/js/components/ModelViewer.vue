@@ -11,7 +11,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 const MAX_HISTORY = 15
 
 // Скорость автовращения: радиан за кадр (при 60 FPS ≈ 3,4°/с); знак — направление
-const ROTATION_SPEED = -0.001
+const ROTATION_SPEED = 0.001
 
 // Пауза перед повторным подключением к генератору, мс (пока Blender прогревается, gen не отвечает)
 const RECONNECT_DELAY = 1000
@@ -49,7 +49,7 @@ const petgMaterial = new THREE.MeshPhysicalMaterial({
 // Стены «комнаты»: градиент сверху вниз, [позиция 0..1, цвет]
 // Нейтральные — для освещения (IBL)
 const ROOM_WALLS_LIGHTING = [
-	[0, '#5c616b'], // потолок
+	[0, '#5c616c'], // потолок
 	[0.35, '#474c55'],
 	[0.5, '#3a3e46'], // горизонт
 	[0.7, '#2a2c32'],
@@ -63,6 +63,7 @@ const ROOM_WALLS_BACKGROUND = [
 	[0.7, '#16212f'],
 	[1, '#0e1520'], // пол
 ]
+
 
 const canvasContainer = ref(null)
 // Параметры модели (имена — как в PARAMS у gen/worker.py).
