@@ -11,7 +11,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 const MAX_HISTORY = 15
 
 // Скорость автовращения: радиан за кадр (при 60 FPS ≈ 3,4°/с); знак — направление
-const ROTATION_SPEED = -0.001
+const ROTATION_SPEED = 0.001
 
 // Пауза перед повторным подключением к генератору, мс (пока Blender прогревается, gen не отвечает)
 const RECONNECT_DELAY = 1000
