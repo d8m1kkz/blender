@@ -64,6 +64,7 @@ const ROOM_WALLS_BACKGROUND = [
 	[1, '#0e1520'], // пол
 ]
 
+
 const canvasContainer = ref(null)
 // Параметры модели (имена — как в PARAMS у gen/worker.py).
 // null — значение неизвестно, пока gen не пришлёт первую модель (оно берётся из сцены Blender).
