@@ -13,7 +13,7 @@ COMPACT_GLB = True
 DRACO_OPTIONS = {
 	"export_draco_position_quantization": 11,
 	"export_draco_mesh_compression_level": 10,
-	"export_normals": False,
+	"export_normals": True,
 	"export_draco_normal_quantization": 8,
 } if COMPACT_GLB else {
 	"export_draco_position_quantization": 14,
